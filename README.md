@@ -55,7 +55,10 @@ The system orchestrates 6 specialized agents through a LangGraph state machine:
 ```
 START → Query Understanding
     ├─ greeting/off_topic → Context Synthesis (skip retrieval)
-    ├─ needs_rewrite=true → Query Rewriting → Retrieval Router
+    ├─ needs_rewrite=true → Query Rewriting
+    │       ├─ multi_part → Query Decomposer → Retrieval Router
+    │       └─ otherwise → Retrieval Router
+    ├─ multi_part → Query Decomposer → Retrieval Router
     └─ clear query → Retrieval Router
                         ↓
               Context Synthesis → Conversation Summarizer → Memory Manager → END
@@ -79,6 +82,22 @@ START → Query Understanding
 | `context` | "Working on an e-commerce API" | Cross-session |
 | `decision` | "Chose PostgreSQL for the database" | Cross-session |
 | `issue` | "Having CORS problems with FastAPI" | Cross-session |
+
+### Memory pruning strategies
+
+Controlled by **`MEMORY_PRUNING_STRATEGY`** (default: `relevance`):
+
+| Strategy | Behavior | Config value |
+|----------|----------|--------------|
+| **Relevance** | Keep rows with highest `relevance_score` (within the prune budget) | `relevance` |
+| **Sliding window** | Keep the **N** most recent memories by `created_at` | `sliding` |
+| **Summary buffer** | Fold the oldest memories beyond the budget into one consolidated **summary** row | `summary` |
+
+Set via `.env`, for example:
+
+```
+MEMORY_PRUNING_STRATEGY=sliding
+```
 
 ## Setup Instructions
 
@@ -226,6 +245,32 @@ List all sessions for a user (newest first).
 #### GET `/api/v1/sessions/{session_id}/messages`
 Get conversation history for a session.
 
+#### GET `/api/v1/sessions/{session_id}/agent-logs`
+
+Retrieve per-message agent decision logs for explainability (from assistant message metadata).
+
+```bash
+curl http://localhost:8000/api/v1/sessions/{session_id}/agent-logs
+```
+
+Response:
+
+```json
+{
+  "session_id": "a1b2c3d4-...",
+  "agent_logs": [
+    {
+      "message_id": "msg-uuid",
+      "timestamp": "2025-01-01T00:00:00",
+      "agent_log": [
+        {"node": "query_understanding", "intent": "factual", "elapsed_seconds": 0.42},
+        {"node": "retrieval_router", "retrieval_strategy": "semantic", "elapsed_seconds": 0.35}
+      ]
+    }
+  ]
+}
+```
+
 #### GET `/api/v1/stats`
 System statistics (vector store counts, SQLite row counts, embedding model).
 
@@ -233,7 +278,18 @@ System statistics (vector store counts, SQLite row counts, embedding model).
 Rolling chat latency (average, p95) and request counters.
 
 #### POST `/api/v1/chat/stream`
-Server-Sent Events stream of LangGraph `values` snapshots, ending with a `done` event containing the same payload shape as `/chat`.
+
+Server-Sent Events with **token-level streaming** during synthesis.
+
+1. **Pre-synthesis** — Query understanding, rewriting, decomposition (when applicable), and retrieval run synchronously (~0.5–1.5s typical; depends on LLM/embeddings).
+2. **Streaming synthesis** — Tokens from `model.stream()` are emitted as SSE events as they are generated (~1–3s typical).
+3. **Post-synthesis** — Conversation summarizer and memory manager run after the full reply (~0.3–0.8s typical).
+
+SSE event types:
+
+- **`token`** — Partial assistant text (incremental).
+- **`done`** — Final payload aligned with `/chat` (`response`, `sources`, `agent_log`, `latency_seconds`, `conversation_summary`, …).
+- **`error`** — Error detail.
 
 #### GET `/api/v1/health`
 Liveness probe.
@@ -273,6 +329,8 @@ Without cross-session memory, the question is ambiguous (Redis? MySQL?). With me
 ### Flow 3 — Conversation summarization
 
 When the session exceeds the configured message threshold (default: **10 messages**), the **conversation summarizer** runs after the response. It produces a **rolling summary** stored on the session (e.g. goals, decisions, open questions). Subsequent turns inject this summary so the model retains gist without sending the full transcript.
+
+Summary length is influenced by **`SUMMARY_COMPRESSION_RATIO`** (default **`0.3`**, i.e. target ~30% of the approximate raw conversation volume passed into the summarizer). Lower values produce more aggressive compression.
 
 ```text
 [Messages 1–10+: routing, Docker, PostgreSQL indexes, env vars, …]

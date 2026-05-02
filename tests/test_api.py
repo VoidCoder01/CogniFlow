@@ -226,7 +226,7 @@ def test_metrics_endpoint(client: TestClient):
         assert key in body
 
 
-def test_session_agent_logs(client: TestClient):
+def test_agent_logs_endpoint(client: TestClient):
     r = client.post("/api/v1/sessions", json={"user_id": "logs-user"})
     assert r.status_code == 200
     sid = r.json()["session_id"]
@@ -249,6 +249,6 @@ def test_session_agent_logs(client: TestClient):
     assert len(payload["agent_logs"]) >= 1
 
 
-def test_session_agent_logs_not_found(client: TestClient):
+def test_agent_logs_not_found(client: TestClient):
     r = client.get("/api/v1/sessions/not-a-real-session/agent-logs")
     assert r.status_code == 404

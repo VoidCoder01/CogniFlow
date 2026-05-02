@@ -475,7 +475,11 @@ def run_streaming_chat(sid: str, uid: str, prompt: str) -> bool:
                 unsafe_allow_html=True,
             )
             st.session_state.messages.append(
-                {"role": "assistant", "content": done_payload.get("response") or ""}
+                {
+                    "role": "assistant",
+                    "content": done_payload.get("response") or "",
+                    "agent_log": done_payload.get("agent_log") or [],
+                }
             )
             st.session_state.last_sources = done_payload.get("sources") or []
             st.session_state.last_agent_log = done_payload.get("agent_log") or []
@@ -484,10 +488,7 @@ def run_streaming_chat(sid: str, uid: str, prompt: str) -> bool:
             )
             st.session_state.last_latency = lat
             render_source_pills(st.session_state.last_sources)
-            ag_log = st.session_state.last_agent_log or []
-            if ag_log:
-                with st.expander("Agent pipeline log", expanded=False):
-                    st.json(ag_log)
+            render_agent_decisions_expander(done_payload.get("agent_log"))
             return True
     except requests.RequestException as e:
         st.error(f"**Cannot reach the API.** Is it running?\n\n`{e}`")
@@ -579,9 +580,14 @@ def load_session_messages(session_id: str) -> None:
             st.error("Could not load messages for this session.")
             return
         raw = r.json().get("messages") or []
-        st.session_state.messages = [
-            {"role": m["role"], "content": m["content"]} for m in raw
-        ]
+        rows: list[dict] = []
+        for m in raw:
+            row = {"role": m["role"], "content": m["content"]}
+            meta = m.get("metadata") or {}
+            if isinstance(meta, dict) and meta.get("agent_log"):
+                row["agent_log"] = meta["agent_log"]
+            rows.append(row)
+        st.session_state.messages = rows
     except requests.RequestException as e:
         st.session_state.messages = []
         st.error(f"Could not load messages: {e}")
@@ -630,6 +636,39 @@ def render_agent_log(log: list[dict] | None) -> None:
                 continue
             lines.append(f"  - `{k}`: `{v}`")
         st.markdown("\n".join(lines))
+
+
+def render_agent_decisions_expander(agent_log: list | None, *, expanded: bool = False) -> None:
+    """Human-readable pipeline timeline for assistant turns (explainability)."""
+    if not agent_log:
+        return
+    with st.expander("🔍 Agent decisions", expanded=expanded):
+        for entry in agent_log:
+            if not isinstance(entry, dict):
+                continue
+            node = entry.get("node", "?")
+            elapsed = entry.get("elapsed_seconds")
+            if node in ("pipeline", "orchestrator"):
+                continue
+            parts = [f"**{node}**"]
+            if "intent" in entry:
+                parts.append(f"intent=`{entry['intent']}`")
+            if "retrieval_strategy" in entry:
+                parts.append(f"strategy=`{entry['retrieval_strategy']}`")
+            if "num_docs" in entry:
+                parts.append(f"docs={entry['num_docs']}")
+            if "num_sub_queries" in entry:
+                parts.append(f"sub_queries={entry['num_sub_queries']}")
+            if "summary_chars" in entry:
+                parts.append(f"summary={entry['summary_chars']}ch")
+            if "num_items" in entry:
+                parts.append(f"memories={entry['num_items']}")
+            if elapsed is not None:
+                try:
+                    parts.append(f"⏱ {float(elapsed):.3f}s")
+                except (TypeError, ValueError):
+                    parts.append(f"⏱ {elapsed}s")
+            st.markdown(" · ".join(parts))
 
 
 def sidebar_branding() -> None:
@@ -1063,6 +1102,8 @@ def main() -> None:
         av = "🧑" if m["role"] == "user" else "🧠"
         with st.chat_message(m["role"], avatar=av):
             st.markdown(m["content"])
+            if m["role"] == "assistant" and m.get("agent_log"):
+                render_agent_decisions_expander(m["agent_log"])
 
     prompt = st.chat_input("Ask about your documents…")
     if not prompt:

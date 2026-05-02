@@ -235,3 +235,24 @@ def test_chat_meta_routing_skips_vector_path():
     )
 
 
+def test_synthesis_prompts_helper():
+    """`_synthesis_prompts` builds prompts from graph-shaped state."""
+    from agents.context_synthesis import _synthesis_prompts
+
+    state = {
+        "session_id": "",
+        "user_id": "",
+        "user_query": "test",
+        "conversation_history": [],
+        "conversation_summary": "",
+        "user_memory_context": "",
+        "cross_session_context": "",
+        "retrieved_documents": [],
+        "query_intent": "factual",
+    }
+    system, user_block, docs, refuse = _synthesis_prompts(state)
+    assert isinstance(system, str)
+    assert "test" in user_block
+    assert refuse is None
+
+

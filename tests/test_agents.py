@@ -185,6 +185,73 @@ def test_merge_graph_patch_appends_lists():
     assert state["response"] == "ok"
 
 
+class TestRetrievalRouterSubQueries:
+    @patch("agents.retrieval_router._get_vector_store")
+    @patch("agents.retrieval_router.get_chat_model")
+    def test_sub_queries_expand_retrieval(self, mock_llm, mock_vs):
+        from agents.schemas import RetrievalRoutingResult
+
+        mock_struct = MagicMock()
+        mock_struct.invoke.return_value = RetrievalRoutingResult(
+            strategy="semantic", rationale="test"
+        )
+        mock_llm.return_value.with_structured_output.return_value = mock_struct
+
+        mock_vs.return_value.semantic_search.side_effect = [
+            [{"id": "doc1", "content": "FastAPI auth", "metadata": {}, "distance": 0.2}],
+            [{"id": "doc2", "content": "Django auth", "metadata": {}, "distance": 0.3}],
+        ]
+
+        state = {
+            "query_intent": "multi_part",
+            "user_query": "compare FastAPI and Django auth",
+            "rewritten_query": "compare FastAPI and Django authentication",
+            "sub_queries": [
+                "FastAPI authentication setup",
+                "Django authentication setup",
+            ],
+            "session_id": "",
+            "user_id": "",
+        }
+        out = retrieval_router_node(state)
+        assert len(out["retrieved_documents"]) == 2
+        ids = {d["id"] for d in out["retrieved_documents"]}
+        assert ids == {"doc1", "doc2"}
+
+
+class TestQueryDecomposer:
+    @patch("agents.query_decomposer.get_chat_model")
+    def test_decomposes_multi_part(self, mock_llm):
+        from agents.query_decomposer import query_decomposer_node
+        from agents.schemas import QueryDecompositionResult
+
+        mock_struct = MagicMock()
+        mock_struct.invoke.return_value = QueryDecompositionResult(
+            sub_queries=["What is FastAPI?", "What is Django?"]
+        )
+        mock_llm.return_value.with_structured_output.return_value = mock_struct
+
+        state = {
+            "user_query": "What is FastAPI and what is Django?",
+            "rewritten_query": "",
+        }
+        result = query_decomposer_node(state)
+        assert len(result["sub_queries"]) == 2
+        assert "FastAPI" in result["sub_queries"][0]
+
+    @patch("agents.query_decomposer.get_chat_model")
+    def test_fallback_on_failure(self, mock_llm):
+        from agents.query_decomposer import query_decomposer_node
+
+        mock_struct = MagicMock()
+        mock_struct.invoke.side_effect = Exception("fail")
+        mock_llm.return_value.with_structured_output.return_value = mock_struct
+
+        state = {"user_query": "original query", "rewritten_query": ""}
+        result = query_decomposer_node(state)
+        assert result["sub_queries"] == ["original query"]
+
+
 class TestRetrievalRouterWithMockVS:
     @patch("agents.retrieval_router._get_vector_store")
     @patch("agents.retrieval_router.get_chat_model")

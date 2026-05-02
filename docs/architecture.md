@@ -85,12 +85,12 @@ Multi-part intents (`multi_part`) route through **Query Decomposer** before retr
 ```mermaid
 stateDiagram-v2
   [*] --> QueryUnderstanding
-  QueryUnderstanding --> ContextSynthesis: greeting / off_topic / direct
+  QueryUnderstanding --> ContextSynthesis: greeting / off_topic / chat_meta
   QueryUnderstanding --> QueryRewriting: needs_rewrite
   QueryUnderstanding --> QueryDecomposer: multi_part
-  QueryUnderstanding --> RetrievalRouter: default retrieve
-  QueryRewriting --> QueryDecomposer: multi_part after rewrite
-  QueryRewriting --> RetrievalRouter: single-part after rewrite
+  QueryUnderstanding --> RetrievalRouter: default
+  QueryRewriting --> QueryDecomposer: multi_part
+  QueryRewriting --> RetrievalRouter: default
   QueryDecomposer --> RetrievalRouter
   RetrievalRouter --> ContextSynthesis
   ContextSynthesis --> ConversationSummarizer

@@ -24,6 +24,8 @@ Return JSON: strategy (semantic|keyword|hybrid|none), rationale (short).
 Use none for greetings or when no doc lookup is needed.
 Use keyword for exact identifiers, error codes, function names. Use hybrid when both matter."""
 
+_MAX_MERGED_DOCS = 8
+
 
 @lru_cache(maxsize=1)
 def _get_vector_store() -> VectorStore:
@@ -43,45 +45,13 @@ def _heuristic_strategy(intent: str, query: str) -> str:
     return "semantic"
 
 
-def _distance_key(doc: dict[str, Any]) -> float:
-    d = doc.get("distance")
-    try:
-        return float(d) if d is not None else 1e9
-    except (TypeError, ValueError):
-        return 1e9
-
-
-def _merge_retrieved_docs(
-    doc_lists: list[list[dict[str, Any]]],
-    top_k: int,
-) -> list[dict[str, Any]]:
-    """Merge multi-query results, keeping best distance per chunk id."""
-    merged: dict[str, dict[str, Any]] = {}
-    for docs in doc_lists:
-        for d in docs:
-            if not isinstance(d, dict):
-                continue
-            did = d.get("id")
-            if did is None:
-                continue
-            prev = merged.get(did)
-            if prev is None or _distance_key(d) < _distance_key(prev):
-                merged[did] = d
-    ranked = sorted(merged.values(), key=_distance_key)
-    return ranked[:top_k]
-
-
 def retrieval_router_node(state: CogniFlowState) -> dict[str, Any]:
     """Choose retrieval strategy, run vector search (possibly over sub-queries), attach chunks."""
     t0 = time.perf_counter()
     intent = (state.get("query_intent") or "factual").lower()
     base_q = state.get("rewritten_query") or state.get("user_query") or ""
-    sub_queries = state.get("sub_queries") or []
-    queries: list[str] = []
-    if sub_queries:
-        queries = [str(s).strip() for s in sub_queries if str(s).strip()]
-    if not queries:
-        queries = [base_q.strip() or base_q]
+    sid = (state.get("session_id") or "").strip()
+    uid = (state.get("user_id") or "").strip()
 
     model = get_chat_model().with_structured_output(RetrievalRoutingResult)
     messages = [
@@ -103,8 +73,6 @@ def retrieval_router_node(state: CogniFlowState) -> dict[str, Any]:
     if strategy not in allowed:
         strategy = _heuristic_strategy(intent, base_q)
 
-    sid = (state.get("session_id") or "").strip()
-    uid = (state.get("user_id") or "").strip()
     if strategy == "none" and sid and corpus_available_for_chat(sid, uid):
         strategy = "semantic"
         rationale = f"{rationale} | session_corpus".strip()
@@ -122,37 +90,48 @@ def retrieval_router_node(state: CogniFlowState) -> dict[str, Any]:
             strategy = "semantic"
             rationale = f"{rationale} | intent_needs_retrieval".strip()
 
-    retrieved_lists: list[list[dict[str, Any]]] = []
+    retrieved: list[dict[str, Any]] = []
+    queries_to_run: list[str] = []
+
     if strategy != "none":
         try:
             vs = _get_vector_store()
             filt = VectorStore.scope_filter(sid, uid)
-            for q in queries:
-                q = q.strip()
-                if not q:
+            raw_sub = state.get("sub_queries") or []
+            stripped_sub = [str(s).strip() for s in raw_sub if str(s).strip()]
+            # Multiple sub-queries from decomposer → retrieve each; otherwise use single base query.
+            queries_to_run = stripped_sub if len(stripped_sub) > 1 else [base_q.strip() or base_q]
+            queries_to_run = [q for q in queries_to_run if q and str(q).strip()]
+
+            seen_ids: set[str] = set()
+            for q in queries_to_run:
+                qt = str(q).strip()
+                if not qt:
                     continue
                 if strategy == "semantic":
-                    retrieved_lists.append(
-                        vs.semantic_search(q, top_k=5, filter_metadata=filt)
-                    )
+                    hits = vs.semantic_search(qt, top_k=5, filter_metadata=filt)
                 elif strategy == "keyword":
-                    retrieved_lists.append(
-                        vs.keyword_search(q, top_k=5, filter_metadata=filt)
-                    )
+                    hits = vs.keyword_search(qt, top_k=5, filter_metadata=filt)
                 else:
-                    retrieved_lists.append(
-                        vs.hybrid_search(q, top_k=5, filter_metadata=filt)
-                    )
-            retrieved = (
-                _merge_retrieved_docs(retrieved_lists, top_k=5)
-                if len(retrieved_lists) > 1
-                else (retrieved_lists[0] if retrieved_lists else [])
-            )
+                    hits = vs.hybrid_search(qt, top_k=5, filter_metadata=filt)
+                for doc in hits:
+                    if not isinstance(doc, dict):
+                        continue
+                    doc_id = str(doc.get("id", "") or "")
+                    if doc_id and doc_id not in seen_ids:
+                        seen_ids.add(doc_id)
+                        retrieved.append(doc)
+
+            def _dist_key(d: dict[str, Any]) -> float:
+                try:
+                    return float(d.get("distance") or 999)
+                except (TypeError, ValueError):
+                    return 999.0
+
+            retrieved.sort(key=_dist_key)
+            retrieved = retrieved[:_MAX_MERGED_DOCS]
         except Exception as exc:
             logger.warning("Vector retrieval failed: %s", exc)
-            retrieved = []
-    else:
-        retrieved = []
 
     log_entry = with_log_timing(
         {
@@ -160,7 +139,7 @@ def retrieval_router_node(state: CogniFlowState) -> dict[str, Any]:
             "retrieval_strategy": strategy,
             "rationale": rationale,
             "num_docs": len(retrieved),
-            "num_sub_queries": len(queries),
+            "num_sub_queries": len(queries_to_run) if strategy != "none" else 0,
         },
         t0,
     )

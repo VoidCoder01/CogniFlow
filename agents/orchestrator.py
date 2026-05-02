@@ -163,6 +163,13 @@ class CogniFlowOrchestrator:
         payload.setdefault("sub_queries", [])
         return payload
 
+    # NOTE: The streaming helpers below (run_until_before_synthesis,
+    # iter_streaming_synthesis, finalize_after_synthesis) invoke agent nodes
+    # directly rather than through the compiled LangGraph. This bypasses
+    # LangGraph's checkpointing for the streaming path, which is acceptable
+    # for this prototype. In production, use LangGraph's native astream_events
+    # API once it supports per-node streaming with checkpointing.
+
     def run_until_before_synthesis(self, graph_state: dict[str, Any]) -> None:
         """Execute QU → optional QR/QD → retrieval; skip synthesis (used for SSE streaming)."""
         merge_graph_patch(graph_state, query_understanding_node(graph_state))
