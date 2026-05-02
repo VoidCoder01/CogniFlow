@@ -1,0 +1,45 @@
+services:
+  api:
+    build: .
+    container_name: cogniflow-api
+    ports:
+      - "8000:8000"
+    env_file:
+      - .env
+    environment:
+      CHROMA_PERSIST_DIR: /app/data/chroma
+      SQLITE_DB_PATH: /app/data/memory.db
+      CHECKPOINT_SQLITE_PATH: /app/data/checkpoints.db
+    volumes:
+      - cogniflow_data:/app/data
+    restart: unless-stopped
+
+  streamlit:
+    build: .
+    container_name: cogniflow-ui
+    command:
+      [
+        "streamlit",
+        "run",
+        "streamlit_app.py",
+        "--server.port",
+        "8501",
+        "--server.address",
+        "0.0.0.0",
+      ]
+    ports:
+      - "8501:8501"
+    env_file:
+      - .env
+    environment:
+      API_BASE_URL: http://api:8000
+      CHROMA_PERSIST_DIR: /app/data/chroma
+      SQLITE_DB_PATH: /app/data/memory.db
+    volumes:
+      - cogniflow_data:/app/data
+    depends_on:
+      - api
+    restart: unless-stopped
+
+volumes:
+  cogniflow_data:

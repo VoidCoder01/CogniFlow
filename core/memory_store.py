@@ -322,3 +322,17 @@ class MemoryStore:
             conn.commit()
         finally:
             conn.close()
+
+    def table_counts(self) -> dict[str, int]:
+        conn = self._get_conn()
+        try:
+            sessions = conn.execute("SELECT COUNT(*) FROM sessions").fetchone()[0]
+            messages = conn.execute("SELECT COUNT(*) FROM messages").fetchone()[0]
+            memories = conn.execute("SELECT COUNT(*) FROM user_memory").fetchone()[0]
+            return {
+                "sessions": int(sessions),
+                "messages": int(messages),
+                "user_memory_rows": int(memories),
+            }
+        finally:
+            conn.close()

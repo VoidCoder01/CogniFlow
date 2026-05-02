@@ -89,6 +89,7 @@ class AgentState(BaseModel):
     user_id: str
     user_query: str
     conversation_history: list[ChatMessage] = Field(default_factory=list)
+    user_memory_context: str = ""
     query_intent: Optional[QueryIntent] = None
     needs_history: bool = False
     needs_rewrite: bool = False
@@ -118,6 +119,8 @@ class ChatResponse(BaseModel):
     response: str
     sources: list[dict] = Field(default_factory=list)
     agent_log: list[dict] = Field(default_factory=list)
+    latency_seconds: Optional[float] = None
+    conversation_summary: str = ""
 
 
 class SessionCreateRequest(BaseModel):

@@ -34,9 +34,12 @@ def context_synthesis_node(state: CogniFlowState) -> dict[str, Any]:
     )
     docs = state.get("retrieved_documents") or []
     summary = state.get("conversation_summary") or ""
+    mem_ctx = (state.get("user_memory_context") or "").strip()
     doc_block = _format_docs(docs)
+    mem_block = f"Known user preferences/context (cross-session):\n{mem_ctx}\n\n" if mem_ctx else ""
     user_block = (
         f"Conversation summary (if any): {summary or '(none)'}\n\n"
+        f"{mem_block}"
         f"Recent messages:\n{hist_snip or '(empty)'}\n\n"
         f"Retrieved sources:\n{doc_block}\n\n"
         f"User question:\n{state.get('user_query', '')}"

@@ -47,6 +47,10 @@ class Settings(BaseSettings):
     chunk_overlap: int = 200
     max_conversation_length: int = 50
     summary_threshold: int = 10
+    summary_max_bullets: int = Field(
+        default=6,
+        description="Max bullet sentences in rolling summary (compression knob)",
+    )
     memory_window_size: int = 5
 
     # API

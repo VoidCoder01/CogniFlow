@@ -15,6 +15,7 @@ class CogniFlowState(TypedDict, total=False):
     user_id: str
     user_query: str
     conversation_history: list[dict[str, Any]]
+    user_memory_context: str
     query_intent: str
     needs_history: bool
     needs_rewrite: bool
@@ -63,6 +64,7 @@ def agent_state_to_graph(s: AgentState) -> CogniFlowState:
         "user_id": s.user_id,
         "user_query": s.user_query,
         "conversation_history": [chat_message_to_dict(m) for m in s.conversation_history],
+        "user_memory_context": s.user_memory_context or "",
         "query_intent": s.query_intent.value if s.query_intent else "",
         "needs_history": s.needs_history,
         "needs_rewrite": s.needs_rewrite,
@@ -102,6 +104,7 @@ def graph_to_agent_state(base: AgentState, g: dict[str, Any]) -> AgentState:
     return base.model_copy(
         update={
             "conversation_history": history,
+            "user_memory_context": str(g.get("user_memory_context") or ""),
             "query_intent": intent,
             "needs_history": bool(g.get("needs_history", False)),
             "needs_rewrite": bool(g.get("needs_rewrite", False)),

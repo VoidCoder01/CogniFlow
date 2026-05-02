@@ -2,6 +2,10 @@
 
 An intelligent conversational RAG (Retrieval-Augmented Generation) system that maintains persistent, context-aware conversations across multiple users using LangGraph-based agentic workflows.
 
+## Architecture diagrams
+
+- Mermaid diagrams (LangGraph flow, memory): [docs/architecture.md](docs/architecture.md)
+
 ## Architecture Overview
 
 ```
@@ -85,7 +89,7 @@ START → Query Understanding
 
 ```bash
 git clone <repository-url>
-cd conversational-rag
+cd CogniFlow
 
 python -m venv .venv
 source .venv/bin/activate   # Linux/Mac
@@ -185,10 +189,12 @@ Response:
   "sources": [
     {"title": "fastapi_guide.md", "source": "...", "relevance": 0.87}
   ],
+  "latency_seconds": 2.3,
+  "conversation_summary": "",
   "agent_log": [
-    {"agent": "query_understanding", "intent": "factual", ...},
-    {"agent": "retrieval_router", "strategy": "semantic", ...},
-    {"agent": "orchestrator", "total_latency_seconds": 2.3}
+    {"node": "query_understanding", "intent": "factual"},
+    {"node": "retrieval_router", "retrieval_strategy": "semantic"},
+    {"node": "orchestrator", "total_latency_seconds": 2.3}
   ]
 }
 ```
@@ -201,14 +207,23 @@ curl -X POST http://localhost:8000/api/v1/documents/upload \
   -F "file=@my_document.pdf"
 ```
 
-#### GET `/api/v1/sessions/{user_id}`
-List all sessions for a user.
+#### GET `/api/v1/users/{user_id}/sessions`
+List all sessions for a user (newest first).
 
 #### GET `/api/v1/sessions/{session_id}/messages`
 Get conversation history for a session.
 
 #### GET `/api/v1/stats`
-System statistics (vector store count, etc.).
+System statistics (vector store counts, SQLite row counts, embedding model).
+
+#### GET `/api/v1/metrics`
+Rolling chat latency (average, p95) and request counters.
+
+#### POST `/api/v1/chat/stream`
+Server-Sent Events stream of LangGraph `values` snapshots, ending with a `done` event containing the same payload shape as `/chat`.
+
+#### GET `/api/v1/health`
+Liveness probe.
 
 ## Sample Conversation Flows
 
@@ -267,7 +282,7 @@ Measured on sample_docs (5 documents, ~200 chunks):
 ## Project Structure
 
 ```
-conversational-rag/
+CogniFlow/
 ├── main.py                      # FastAPI application entry point
 ├── config.py                    # Environment configuration
 ├── streamlit_app.py             # Streamlit chat UI
@@ -276,6 +291,8 @@ conversational-rag/
 ├── Dockerfile                   # Container image
 ├── docker-compose.yml           # Multi-service orchestration
 ├── .env.example                 # Environment template
+├── docs/
+│   └── architecture.md         # Mermaid architecture diagrams
 │
 ├── agents/                      # LangGraph agent nodes
 │   ├── orchestrator.py          # Graph builder + RAGPipeline class
@@ -295,9 +312,12 @@ conversational-rag/
 │   └── llm_provider.py          # Multi-provider LLM factory
 │
 ├── api/                         # FastAPI routes
-│   └── routes.py                # Chat, session, upload endpoints
+│   ├── routes.py                # Chat, session, upload, metrics
+│   ├── deps.py                  # Singletons (memory, vector, orchestrator)
+│   └── metrics.py               # Rolling latency / counters
 │
-├── sample_docs/                 # 5 technical documents for demo
+├── sample_docs/                 # Sample technical documents (ingest for RAG)
+│   ├── example_api.md
 │   ├── fastapi_guide.md
 │   ├── docker_guide.md
 │   ├── langchain_rag_guide.md
@@ -319,8 +339,20 @@ conversational-rag/
 
 ## Running Tests
 
+Use a virtualenv with all dependencies from `requirements.txt` (including `python-multipart` for upload routes):
+
 ```bash
+python -m venv .venv
+source .venv/bin/activate   # Windows: .venv\Scripts\activate
+pip install -r requirements.txt
 pytest tests/ -v
+```
+
+Optional coverage:
+
+```bash
+pip install pytest-cov
+pytest tests/ --cov=. --cov-report=term-missing --ignore=venv --ignore=.venv
 ```
 
 ## License
