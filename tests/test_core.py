@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import pytest
 
+from agents.retrieval_hints import query_answer_from_chat_skip_retrieval
 from core.document_processor import DocumentProcessor
 from core.memory_store import MemoryStore
 from core.models import ChatMessage, MessageRole, QueryIntent, RetrievalStrategy, Session
@@ -220,5 +221,17 @@ def test_query_intent_enum_values():
 def test_retrieval_strategy_enum():
     names = set(RetrievalStrategy.__members__.keys())
     assert names == {"semantic", "keyword", "hybrid", "none"}
+
+
+def test_chat_meta_routing_skips_vector_path():
+    assert query_answer_from_chat_skip_retrieval("What is the document name?") is True
+    assert query_answer_from_chat_skip_retrieval("What did I upload?") is True
+    assert query_answer_from_chat_skip_retrieval("What is my name?") is True
+    assert (
+        query_answer_from_chat_skip_retrieval(
+            "Explain the authentication section in the uploaded PDF in detail"
+        )
+        is False
+    )
 
 

@@ -41,6 +41,7 @@ class _FakeOrchestrator:
 def client(tmp_path, monkeypatch, clear_singletons):
     monkeypatch.setenv("SQLITE_DB_PATH", str(tmp_path / "memory.db"))
     monkeypatch.setenv("CHROMA_PERSIST_DIR", str(tmp_path / "chroma"))
+    monkeypatch.setenv("CHAT_RESPONSE_CACHE_BACKEND", "memory")
 
     import importlib
     from importlib import reload
@@ -192,6 +193,7 @@ def test_upload_duplicate_is_not_reindexed(client: TestClient):
     sid = r_sess.json()["session_id"]
     fake_vs = MagicMock()
     fake_vs.has_document = MagicMock(return_value=True)
+    fake_vs.has_user_document = MagicMock(return_value=False)
     client.app.dependency_overrides[get_vector_store] = lambda: fake_vs
     try:
         r = client.post(
@@ -222,3 +224,31 @@ def test_metrics_endpoint(client: TestClient):
         "last_updated_unix",
     ):
         assert key in body
+
+
+def test_session_agent_logs(client: TestClient):
+    r = client.post("/api/v1/sessions", json={"user_id": "logs-user"})
+    assert r.status_code == 200
+    sid = r.json()["session_id"]
+
+    r2 = client.post(
+        "/api/v1/chat",
+        json={
+            "session_id": sid,
+            "user_id": "logs-user",
+            "message": "Hello?",
+        },
+    )
+    assert r2.status_code == 200
+
+    r3 = client.get(f"/api/v1/sessions/{sid}/agent-logs")
+    assert r3.status_code == 200
+    payload = r3.json()
+    assert payload["session_id"] == sid
+    assert isinstance(payload["agent_logs"], list)
+    assert len(payload["agent_logs"]) >= 1
+
+
+def test_session_agent_logs_not_found(client: TestClient):
+    r = client.get("/api/v1/sessions/not-a-real-session/agent-logs")
+    assert r.status_code == 404

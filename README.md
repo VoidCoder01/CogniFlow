@@ -44,9 +44,10 @@ The system orchestrates 6 specialized agents through a LangGraph state machine:
 |-------|---------|---------|
 | **Query Understanding** | Classifies intent (factual, follow-up, clarification, comparison, multi-part, greeting, off-topic) and decides if conversation history is needed | Entry point → conditional routing |
 | **Query Rewriting** | Reformulates ambiguous queries by incorporating conversation context (resolves pronouns like "it", "that") | Only triggered if query needs rewriting |
+| **Query Decomposer** | Splits multi-part questions into sub-queries for retrieval | Runs when intent is `multi_part` (before the retrieval router) |
 | **Retrieval Router** | Selects optimal search strategy: semantic, keyword, or hybrid based on query characteristics | Skipped for greetings/off-topic |
 | **Context Synthesis** | Combines retrieved documents with conversation history to generate the final LLM response | Always runs |
-| **Conversation Summarizer** | Periodically summarizes long conversations to maintain context within token limits | Runs after every response |
+| **Conversation Summarizer** | Periodically summarizes long conversations to maintain context within token limits | Runs when message count ≥ `summary_threshold` (see config) |
 | **Memory Manager** | Identifies important information (preferences, decisions, context) to persist across sessions | Final node before END |
 
 ### Conditional Routing Logic
@@ -63,8 +64,8 @@ START → Query Understanding
 ## Memory Management Strategy
 
 ### Short-term (per-session)
-- **Sliding window**: Last N messages kept in active memory (configurable, default 5 exchanges)
-- **Summary buffer**: When conversation exceeds threshold (default 10 messages), a summary is generated and stored
+- **Sliding window**: Last N messages kept in active memory (`MEMORY_WINDOW_SIZE` user–assistant pairs; default **10** pairs → up to 20 messages loaded for the graph)
+- **Summary buffer**: When enough messages exist (`SUMMARY_THRESHOLD`, default **2**), rolling summaries are generated and stored on `sessions.summary`
 
 ### Long-term (cross-session)
 - **User memory**: Preferences, project context, decisions, and issues stored in SQLite
@@ -199,12 +200,17 @@ Response:
   "latency_seconds": 2.3,
   "conversation_summary": "",
   "agent_log": [
-    {"node": "query_understanding", "intent": "factual"},
-    {"node": "retrieval_router", "retrieval_strategy": "semantic"},
-    {"node": "orchestrator", "total_latency_seconds": 2.3}
+    {"node": "query_understanding", "intent": "factual", "elapsed_seconds": 0.42},
+    {"node": "retrieval_router", "retrieval_strategy": "semantic", "elapsed_seconds": 0.35},
+    {"node": "orchestrator", "total_latency_seconds": 2.3},
+    {"node": "pipeline", "timed_node_steps": 6, "elapsed_seconds_sum_nodes": 1.85}
   ]
 }
 ```
+
+Each graph node appends **`elapsed_seconds`** (per-node CPU time). The final **`pipeline`** row sums those node times; **`orchestrator.total_latency_seconds`** is end-to-end wall time (LLM + retrieval + SQLite).
+
+Questions about **chat meta** (e.g. your name, **document/file names**, what you uploaded) **skip vector retrieval** and go straight to context synthesis using conversation history — faster and fewer LLM calls on the retrieval path.
 
 #### POST `/api/v1/documents/upload`
 Upload a document for RAG ingestion.
@@ -364,12 +370,26 @@ pip install -r requirements.txt
 pytest tests/ -v
 ```
 
-Optional coverage:
+Coverage (targets **agents**, **core**, **api**; HTML report under `htmlcov/`):
 
 ```bash
-pip install pytest-cov
-pytest tests/ --cov=. --cov-report=term-missing --ignore=venv --ignore=venv
+make cov
+# or:
+pytest tests/ --cov=agents --cov=core --cov=api --cov-report=term-missing --cov-report=html -v
 ```
+
+## Performance benchmarks
+
+Measured on this repo’s dev setup (single machine; numbers vary with CPU, disk, and LLM latency):
+
+| Metric | Observed |
+|--------|----------|
+| `/api/v1/health` (warm, local) | ~11–15 ms total HTTP time (`curl -w '%{time_total}'`) |
+| Full `/chat` pipeline | Dominated by LLM + embedding latency; inspect `agent_log` `elapsed_seconds` per node |
+| SQLite session messages | Typically sub-ms per query on local SSD |
+| Chroma semantic query | Depends on collection size and embedding backend (`local` vs OpenAI) |
+
+Reproduce health timing: `curl -s -o /dev/null -w "%{time_total}s\n" http://127.0.0.1:8000/api/v1/health`
 
 ## License
 

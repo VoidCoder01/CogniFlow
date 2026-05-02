@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import logging
+import time
 from typing import Any
 
 from langchain_core.messages import HumanMessage, SystemMessage
 
 from agents.graph_state import CogniFlowState
+from agents.node_utils import with_log_timing
 from agents.schemas import MemoryExtractionResult
 from core.llm_provider import get_chat_model
 
@@ -18,6 +20,8 @@ Only include high-signal facts; otherwise return items: []."""
 
 
 def memory_manager_node(state: CogniFlowState) -> dict[str, Any]:
+    """Extract structured long-term memories from the latest assistant turn."""
+    t0 = time.perf_counter()
     model = get_chat_model().with_structured_output(MemoryExtractionResult)
     history = state.get("conversation_history") or []
     hist_snip = "\n".join(
@@ -41,7 +45,9 @@ def memory_manager_node(state: CogniFlowState) -> dict[str, Any]:
         logger.warning("memory_manager structured output failed: %s", exc)
         items = []
 
-    log_entry = {"node": "memory_manager", "num_items": len(items)}
+    log_entry = with_log_timing(
+        {"node": "memory_manager", "num_items": len(items)}, t0
+    )
     return {
         "memory_updates": items,
         "agent_log": [log_entry],

@@ -16,11 +16,13 @@ class CogniFlowState(TypedDict, total=False):
     user_query: str
     conversation_history: list[dict[str, Any]]
     user_memory_context: str
+    cross_session_context: str
     query_intent: str
     needs_history: bool
     needs_rewrite: bool
     rewritten_query: str
     retrieval_strategy: str
+    sub_queries: list[str]
     retrieved_documents: list[dict[str, Any]]
     synthesized_context: str
     response: str
@@ -65,11 +67,13 @@ def agent_state_to_graph(s: AgentState) -> CogniFlowState:
         "user_query": s.user_query,
         "conversation_history": [chat_message_to_dict(m) for m in s.conversation_history],
         "user_memory_context": s.user_memory_context or "",
+        "cross_session_context": s.cross_session_context or "",
         "query_intent": s.query_intent.value if s.query_intent else "",
         "needs_history": s.needs_history,
         "needs_rewrite": s.needs_rewrite,
         "rewritten_query": s.rewritten_query,
         "retrieval_strategy": s.retrieval_strategy.value,
+        "sub_queries": [],
         "retrieved_documents": list(s.retrieved_documents),
         "synthesized_context": s.synthesized_context,
         "response": s.response,
@@ -105,6 +109,7 @@ def graph_to_agent_state(base: AgentState, g: dict[str, Any]) -> AgentState:
         update={
             "conversation_history": history,
             "user_memory_context": str(g.get("user_memory_context") or ""),
+            "cross_session_context": str(g.get("cross_session_context") or ""),
             "query_intent": intent,
             "needs_history": bool(g.get("needs_history", False)),
             "needs_rewrite": bool(g.get("needs_rewrite", False)),
@@ -121,4 +126,7 @@ def graph_to_agent_state(base: AgentState, g: dict[str, Any]) -> AgentState:
     )
 
 
-RouteAfterUnderstanding = Literal["rewrite", "retrieve", "direct_synthesize"]
+RouteAfterUnderstanding = Literal[
+    "rewrite", "retrieve", "direct_synthesize", "decompose"
+]
+RouteAfterRewriting = Literal["decompose", "retrieve"]

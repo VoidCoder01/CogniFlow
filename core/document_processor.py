@@ -31,6 +31,7 @@ class DocumentProcessor:
         self._upload_original_name: str | None = None
         self._upload_doc_id: str | None = None
         self._ingest_session_id: str = ""
+        self._ingest_user_id: str = ""
         self._ingest_content_hash: str = ""
 
     def process_file(
@@ -40,6 +41,7 @@ class DocumentProcessor:
         original_filename: Optional[str] = None,
         doc_instance_id: Optional[str] = None,
         session_id: Optional[str] = None,
+        user_id: Optional[str] = None,
         content_hash: Optional[str] = None,
     ) -> list[DocumentChunk]:
         p = Path(path).expanduser().resolve()
@@ -49,6 +51,7 @@ class DocumentProcessor:
         self._upload_original_name = (original_filename or "").strip() or None
         self._upload_doc_id = (doc_instance_id or "").strip() or None
         self._ingest_session_id = (session_id or "").strip()
+        self._ingest_user_id = (user_id or "").strip()
         self._ingest_content_hash = (content_hash or "").strip()
         try:
             suffix = p.suffix.lower()
@@ -62,12 +65,14 @@ class DocumentProcessor:
                 raise ValueError(f"Unsupported document type: {suffix} ({p})")
             for c in out:
                 c.metadata.session_id = self._ingest_session_id
+                c.metadata.user_id = self._ingest_user_id
                 c.metadata.content_hash = self._ingest_content_hash
             return out
         finally:
             self._upload_original_name = None
             self._upload_doc_id = None
             self._ingest_session_id = ""
+            self._ingest_user_id = ""
             self._ingest_content_hash = ""
 
     def process_paths(
@@ -75,10 +80,11 @@ class DocumentProcessor:
         paths: list[str | Path],
         *,
         session_id: Optional[str] = None,
+        user_id: Optional[str] = None,
     ) -> list[DocumentChunk]:
         out: list[DocumentChunk] = []
         for raw in paths:
-            out.extend(self.process_file(raw, session_id=session_id))
+            out.extend(self.process_file(raw, session_id=session_id, user_id=user_id))
         return out
 
     def _process_pdf(self, path: Path) -> list[DocumentChunk]:
@@ -146,7 +152,10 @@ class DocumentProcessor:
 
     def _process_html(self, path: Path) -> list[DocumentChunk]:
         raw = path.read_text(encoding="utf-8", errors="replace")
-        soup = BeautifulSoup(raw, "lxml")
+        try:
+            soup = BeautifulSoup(raw, "lxml")
+        except Exception:
+            soup = BeautifulSoup(raw, "html.parser")
         for tag in soup(["script", "style", "noscript"]):
             tag.decompose()
 

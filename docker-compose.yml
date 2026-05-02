@@ -10,8 +10,15 @@ services:
       CHROMA_PERSIST_DIR: /app/data/chroma
       SQLITE_DB_PATH: /app/data/memory.db
       CHECKPOINT_SQLITE_PATH: /app/data/checkpoints.db
+      CHAT_RESPONSE_CACHE_SQLITE_PATH: /app/data/response_cache.db
     volumes:
       - cogniflow_data:/app/data
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/api/v1/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
     restart: unless-stopped
 
   streamlit:
@@ -38,7 +45,8 @@ services:
     volumes:
       - cogniflow_data:/app/data
     depends_on:
-      - api
+      api:
+        condition: service_healthy
     restart: unless-stopped
 
 volumes:

@@ -38,9 +38,9 @@ class Settings(BaseSettings):
     llm_temperature: float = 0.2
     llm_max_tokens: int = 2048
 
-    # LangGraph checkpointing: memory (default) or sqlite (persistent thread state)
+    # LangGraph checkpointing: sqlite (persistent thread state) or memory (ephemeral)
     checkpoint_backend: str = Field(
-        default="memory",
+        default="sqlite",
         description="memory | sqlite",
     )
     checkpoint_sqlite_path: str = "./data/checkpoints.db"
@@ -63,13 +63,34 @@ class Settings(BaseSettings):
     # Chunking & conversation
     chunk_size: int = 1000
     chunk_overlap: int = 200
-    max_conversation_length: int = 50
-    summary_threshold: int = 10
+    max_conversation_length: int = 200
+    summary_threshold: int = 2
     summary_max_bullets: int = Field(
         default=6,
         description="Max bullet sentences in rolling summary (compression knob)",
     )
-    memory_window_size: int = 5
+    memory_window_size: int = 10
+    memory_pruning_strategy: str = Field(
+        default="relevance",
+        description="relevance | sliding | summary — how to trim user_memory after turns",
+    )
+    summary_compression_ratio: float = Field(
+        default=0.3,
+        ge=0.1,
+        le=0.8,
+        description="Target compression ratio for conversation summaries vs raw message volume",
+    )
+
+    # RAG quality gate (cosine-style distance → relevance = 1 - distance, capped [0,1])
+    retrieval_min_relevance: float = Field(
+        default=0.18,
+        ge=0.0,
+        le=1.0,
+        description=(
+            "Chunks below this relevance are dropped. If none remain and this chat has "
+            "indexed docs, skip the main LLM and return a fast 'not in your documents' reply."
+        ),
+    )
 
     # API
     api_host: str = "0.0.0.0"
@@ -77,6 +98,47 @@ class Settings(BaseSettings):
     expose_internal_errors: bool = Field(
         default=False,
         description="If true, /chat 500 responses include full exception text (dev only).",
+    )
+
+    # Response cache (exact + optional semantic similarity; cleared on upload for that session)
+    chat_exact_message_cache_enabled: bool = Field(
+        default=True,
+        description="Enable response cache (per session+user); cleared on document upload.",
+    )
+    chat_exact_message_cache_max_entries: int = Field(default=512, ge=16)
+    chat_message_cache_normalize_whitespace: bool = Field(
+        default=True,
+        description="Collapse repeated spaces/newlines before cache lookup / embedding.",
+    )
+    chat_response_cache_mode: str = Field(
+        default="both",
+        description="exact | semantic | both — both = exact string match then embedding similarity.",
+    )
+    chat_response_cache_min_similarity: float = Field(
+        default=0.82,
+        ge=0.5,
+        le=1.0,
+        description="Minimum cosine similarity for semantic cache hits (same session+user).",
+    )
+    chat_response_cache_backend: str = Field(
+        default="sqlite",
+        description="sqlite (persistent, survives restarts) | memory (process-local only).",
+    )
+    chat_response_cache_sqlite_path: str = Field(
+        default="./data/response_cache.db",
+        description="SQLite path when backend is sqlite (mount with other ./data volumes).",
+    )
+    chat_response_cache_include_context: bool = Field(
+        default=False,
+        description=(
+            "If true, cache keys include rolling summary + recent messages — safer RAG answers "
+            "per thread state; repeats after long chats miss more often."
+        ),
+    )
+    chat_response_cache_context_messages: int = Field(
+        default=16,
+        ge=0,
+        description="Messages from DB tail hashed into cache fingerprint when include_context is true.",
     )
 
 

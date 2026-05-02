@@ -74,8 +74,9 @@ class DocumentMetadata(BaseModel):
     # API uploads: disambiguate same filename (e.g. two README.md) and avoid temp paths in citations
     original_filename: str = ""
     doc_instance_id: str = ""
-    # Vector scope: chunks belong to one chat session (or "__global__" for CLI ingest)
+    # Vector scope: chat session + same user (retrieval uses session OR user for cross-chat RAG)
     session_id: str = ""
+    user_id: str = ""
     # Content-level dedupe key (sha256) for "do not re-index same file bytes"
     content_hash: str = ""
 
@@ -107,6 +108,7 @@ class AgentState(BaseModel):
     response: str = ""
     should_summarize: bool = False
     conversation_summary: str = ""
+    cross_session_context: str = ""
     memory_updates: list[dict] = Field(default_factory=list)
     agent_log: list[dict] = Field(default_factory=list)
 

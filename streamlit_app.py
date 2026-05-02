@@ -5,6 +5,7 @@ CogniFlow — minimal Streamlit chat UI for the FastAPI RAG backend.
 from __future__ import annotations
 
 import html
+import json
 import os
 import time
 import uuid
@@ -14,6 +15,8 @@ import requests
 import streamlit as st
 
 DEFAULT_API = os.environ.get("API_BASE_URL", "http://127.0.0.1:8000").rstrip("/")
+# Pause between each chunk in st.write_stream (higher = slower typing effect).
+_UI_STREAM_DELAY_SEC = float(os.environ.get("STREAMLIT_STREAM_DELAY_SEC", "0.01"))
 
 # Single brand teal for Streamlit UI (no multi-shade accent ramp).
 _TEAL = "#14b8a6"
@@ -369,6 +372,128 @@ def api_post(path: str, json_body: dict | None = None, **kw: Any) -> requests.Re
     return requests.post(f"{api_base()}{path}", json=json_body, timeout=600, **kw)
 
 
+def _stream_text_chunks(text: str, chunk_size: int = 8):
+    """Yield strings for st.write_stream (fallback when API does not emit `token` SSE events)."""
+    t = text or ""
+    if not t:
+        return
+    n = len(t)
+    for i in range(0, n, chunk_size):
+        yield t[i : i + chunk_size]
+        if i + chunk_size < n:
+            time.sleep(_UI_STREAM_DELAY_SEC)
+
+
+def run_streaming_chat(sid: str, uid: str, prompt: str) -> bool:
+    """
+    POST /chat/stream (SSE). Streamlit only redraws progressively for ``st.write_stream``,
+    not for repeated ``empty().markdown`` in a loop—so we use a spinner while the graph runs
+    and a generator that yields ``token`` chunks (or falls back to chunking the final reply).
+    """
+    url = f"{api_base()}/api/v1/chat/stream"
+    t0 = time.perf_counter()
+    stream_state: dict[str, Any] = {"done": None, "error": None, "n_tokens": 0}
+
+    try:
+        with requests.post(
+            url,
+            json={"session_id": sid, "user_id": uid, "message": prompt},
+            stream=True,
+            timeout=600,
+        ) as resp:
+            if resp.status_code == 404:
+                st.error("Session not found. Start a new chat from the sidebar.")
+                return False
+            if resp.status_code != 200:
+                st.error(f"Chat failed ({resp.status_code}): {resp.text}")
+                return False
+
+            def sse_answer_chunks():
+                for raw_line in resp.iter_lines(decode_unicode=True):
+                    if not raw_line:
+                        continue
+                    line = raw_line.strip()
+                    if not line.startswith("data:"):
+                        continue
+                    pl = line[5:].strip()
+                    if not pl:
+                        continue
+                    try:
+                        evt_obj = json.loads(pl)
+                    except json.JSONDecodeError:
+                        continue
+
+                    ev = evt_obj.get("event")
+                    if ev == "error":
+                        stream_state["error"] = str(
+                            evt_obj.get("detail", "Stream error")
+                        )
+                        return
+                    if ev == "token":
+                        piece = evt_obj.get("data")
+                        if piece is None:
+                            continue
+                        if not isinstance(piece, str):
+                            piece = str(piece)
+                        stream_state["n_tokens"] = (
+                            int(stream_state.get("n_tokens", 0)) + 1
+                        )
+                        yield piece
+                        time.sleep(_UI_STREAM_DELAY_SEC)
+                    elif ev == "done":
+                        data = evt_obj.get("data")
+                        d = data if isinstance(data, dict) else None
+                        if d and int(stream_state.get("n_tokens", 0)) == 0:
+                            ans = (d.get("response") or "").strip()
+                            if ans:
+                                yield from _stream_text_chunks(ans)
+                        stream_state["done"] = d
+                        return
+                    # ev == "update": LangGraph progress — spinner covers this phase
+
+            with st.spinner("Running agents & generating your answer…"):
+                st.write_stream(sse_answer_chunks())
+
+            if stream_state.get("error"):
+                st.error(stream_state["error"])
+                return False
+
+            done_payload = stream_state.get("done")
+            if not isinstance(done_payload, dict):
+                st.error("No response from server (stream ended early).")
+                return False
+
+            answer = (done_payload.get("response") or "").strip()
+            if not answer and int(stream_state.get("n_tokens", 0)) == 0:
+                st.markdown("_No response text returned._")
+
+            lat = done_payload.get("latency_seconds")
+            if lat is None:
+                lat = round(time.perf_counter() - t0, 2)
+            st.markdown(
+                f'<p class="cf-latency">⚡ {lat}s</p>',
+                unsafe_allow_html=True,
+            )
+            st.session_state.messages.append(
+                {"role": "assistant", "content": done_payload.get("response") or ""}
+            )
+            st.session_state.last_sources = done_payload.get("sources") or []
+            st.session_state.last_agent_log = done_payload.get("agent_log") or []
+            st.session_state.last_summary = (
+                done_payload.get("conversation_summary") or ""
+            )
+            st.session_state.last_latency = lat
+            render_source_pills(st.session_state.last_sources)
+            ag_log = st.session_state.last_agent_log or []
+            if ag_log:
+                with st.expander("Agent pipeline log", expanded=False):
+                    st.json(ag_log)
+            return True
+    except requests.RequestException as e:
+        st.error(f"**Cannot reach the API.** Is it running?\n\n`{e}`")
+        return False
+
+
 def check_health() -> tuple[bool, str]:
     try:
         r = api_get("/api/v1/health", timeout=5)
@@ -379,11 +504,18 @@ def check_health() -> tuple[bool, str]:
         return False, str(e)[:120]
 
 
-def fetch_chunk_count(session_id: str | None = None) -> int | None:
-    """Chunk count for the whole store, or for the active chat session if session_id is set."""
+def fetch_chunk_count(
+    session_id: str | None = None, user_id: str | None = None
+) -> int | None:
+    """Chunk count: full store, or RAG scope for this chat (session ∪ same user) when both ids set."""
     try:
-        params = {"session_id": session_id} if (session_id or "").strip() else None
-        r = api_get("/api/v1/stats", timeout=5, params=params)
+        params: dict[str, str] = {}
+        if (session_id or "").strip():
+            params["session_id"] = session_id.strip()
+        if (user_id or "").strip():
+            params["user_id"] = user_id.strip()
+        q = params or None
+        r = api_get("/api/v1/stats", timeout=5, params=q)
         if r.ok:
             return int(r.json().get("vector_store", {}).get("count", 0))
     except requests.RequestException:
@@ -648,47 +780,124 @@ def _post_one_document(
     return r.status_code, r.json()
 
 
-def index_session_documents(session_id: str, uploaded_files: list[Any]) -> None:
-    """Index several files in one go (sequential API calls, one summary)."""
+def _flush_kb_notices(scope: str) -> None:
+    """Show one-shot messages after indexing (survives st.rerun)."""
+    key = f"kb_notice_{scope}"
+    if key not in st.session_state:
+        return
+    payload = st.session_state.pop(key)
+    parts = payload.get("parts") if isinstance(payload, dict) else None
+    if not parts:
+        return
+    for p in parts:
+        if not isinstance(p, dict):
+            continue
+        kind = (p.get("kind") or "info").lower()
+        text = (p.get("text") or "").strip()
+        if not text:
+            continue
+        if kind == "success":
+            st.success(text)
+        elif kind == "error":
+            st.error(text)
+        else:
+            st.info(text)
+
+
+def index_session_documents(
+    session_id: str,
+    uploaded_files: list[Any],
+    uploader_scope: str | None = None,
+) -> None:
+    """Index several files in one go (sequential API calls). Plain-language feedback."""
     sid = (session_id or "").strip()
     if not sid or not uploaded_files:
         return
-    indexed_chunks = 0
-    indexed_files = 0
-    skipped = 0
+    new_names: list[str] = []
+    already_names: list[str] = []
     errors: list[str] = []
     try:
         for uf in uploaded_files:
             code, body = _post_one_document(sid, uf)
             label = getattr(uf, "name", "file")
             if code != 200:
-                errors.append(f"`{label}`: {body if isinstance(body, str) else code}")
+                detail = body if isinstance(body, str) else f"HTTP {code}"
+                errors.append(f"**{label}** — could not add ({detail[:120]})")
                 continue
             assert isinstance(body, dict)
             status = body.get("status", "")
-            n = int(body.get("num_chunks") or 0)
+            display_name = (body.get("filename") or label or "file").strip()
             if status == "already_indexed":
-                skipped += 1
+                already_names.append(display_name)
             else:
-                indexed_files += 1
-                indexed_chunks += n
-        parts: list[str] = []
-        if indexed_files:
-            parts.append(
-                f"Indexed **{indexed_chunks}** chunk(s) from **{indexed_files}** file(s)."
-            )
-        if skipped:
-            parts.append(f"Skipped **{skipped}** already indexed.")
-        if parts:
-            st.success(" ".join(parts))
-        elif skipped and not errors:
-            st.info(
-                f"All **{skipped}** file(s) were already indexed for this chat."
-            )
+                new_names.append(display_name)
+
+        notice_parts: list[dict[str, str]] = []
+        uniq_new = list(dict.fromkeys(new_names))
+        uniq_already = list(dict.fromkeys(already_names))
+
+        if uniq_new:
+            if len(uniq_new) == 1:
+                notice_parts.append(
+                    {
+                        "kind": "success",
+                        "text": f"**Added to this chat:** {uniq_new[0]}. You can ask about it below.",
+                    }
+                )
+            else:
+                joined = ", ".join(uniq_new)
+                notice_parts.append(
+                    {
+                        "kind": "success",
+                        "text": f"**Added to this chat:** {joined}. You can ask about them below.",
+                    }
+                )
+
+        if uniq_already:
+            if len(uniq_already) == 1:
+                already_txt = (
+                    f"**{uniq_already[0]}** is already in this chat — nothing to import again. "
+                    "Try asking a question about it below."
+                )
+            else:
+                already_txt = (
+                    "These files are **already in this chat**: "
+                    f"{', '.join(uniq_already)}. "
+                    "You do not need to add them again — go ahead and ask a question."
+                )
+            notice_parts.append({"kind": "info", "text": already_txt})
+
         if errors:
-            st.error("Some uploads failed:\n\n" + "\n".join(errors))
+            notice_parts.append(
+                {
+                    "kind": "error",
+                    "text": "Could not add some files:\n\n" + "\n\n".join(errors),
+                }
+            )
+
+        if uploader_scope in ("chat", "sidebar") and notice_parts:
+            st.session_state[f"kb_notice_{uploader_scope}"] = {"parts": notice_parts}
+            vkey = (
+                "kb_upload_v_chat"
+                if uploader_scope == "chat"
+                else "kb_upload_v_sidebar"
+            )
+            st.session_state[vkey] = int(st.session_state.get(vkey, 0)) + 1
+            st.rerun()
+        elif notice_parts:
+            for p in notice_parts:
+                k = (p.get("kind") or "info").lower()
+                t = (p.get("text") or "").strip()
+                if not t:
+                    continue
+                if k == "success":
+                    st.success(t)
+                elif k == "error":
+                    st.error(t)
+                else:
+                    st.info(t)
     except requests.RequestException as e:
-        st.error(str(e))
+        st.error(f"Could not reach the server. Check that the API is running.\n\n{e}")
 
 
 def chat_area_document_upload(active_session_id: str) -> None:
@@ -696,19 +905,21 @@ def chat_area_document_upload(active_session_id: str) -> None:
     sid = (active_session_id or "").strip()
     if not sid:
         return
+    _flush_kb_notices("chat")
     st.markdown(
         '<div class="cf-upload-card">'
         '<p class="cf-upload-title">Attach Documents</p>'
         "<p class=\"cf-upload-sub\">Drop files here and click <b>Index in this chat</b>. "
-        "Only this session can use these files.</p>"
+        "The same user can search these chunks from other chats too.</p>"
         "</div>",
         unsafe_allow_html=True,
     )
+    _v = int(st.session_state.get("kb_upload_v_chat", 0))
     cu = st.file_uploader(
         "Add files for this conversation",
         type=["pdf", "md", "markdown", "html", "htm"],
         accept_multiple_files=True,
-        key="chat_kb_upload",
+        key=f"chat_kb_upload_{_v}",
         label_visibility="collapsed",
     )
     if cu:
@@ -725,30 +936,38 @@ def chat_area_document_upload(active_session_id: str) -> None:
         type="secondary",
     ):
         if cu:
-            index_session_documents(sid, list(cu))
+            index_session_documents(sid, list(cu), "chat")
 
 
 def sidebar_upload(active_session_id: str) -> None:
     st.markdown('<p class="cf-sec-label">Knowledge base</p>', unsafe_allow_html=True)
-    st.caption("Documents are indexed **per chat session** — only this thread sees them in RAG.")
+    st.caption("Uploads are tagged to this chat and **your user id** — retrieval includes this chat **and** your other chats’ files.")
     sid = (active_session_id or "").strip()
     if not sid:
         st.caption("Open or start a chat to attach uploads to that session.")
+    _flush_kb_notices("sidebar")
+    _sv = int(st.session_state.get("kb_upload_v_sidebar", 0))
     up = st.file_uploader(
         "Upload",
         type=["pdf", "md", "markdown", "html", "htm"],
         accept_multiple_files=True,
+        key=f"sidebar_kb_upload_{_sv}",
         label_visibility="collapsed",
     )
     can_index = bool(up) and bool(sid)
     if st.button("Index", use_container_width=True, disabled=not can_index):
         if not up or not sid:
             return
-        index_session_documents(sid, list(up))
+        index_session_documents(sid, list(up), "sidebar")
 
-    n = fetch_chunk_count(sid if sid else None)
+    uid = (st.session_state.get("user_id") or "").strip()
+    n = fetch_chunk_count(sid if sid else None, uid if sid else None)
     if n is not None:
-        lbl = "chunks in this chat" if sid else "chunks in vector store"
+        lbl = (
+            "chunks searchable here (this chat + your account)"
+            if sid
+            else "chunks in vector store"
+        )
         st.markdown(
             f'<div class="cf-chunk-stat"><div class="n">{n}</div>'
             f'<div class="lbl">{lbl}</div></div>',
@@ -807,6 +1026,10 @@ def main() -> None:
         st.session_state.last_latency = None
     if "dismissed_sessions" not in st.session_state:
         st.session_state.dismissed_sessions = set()
+    if "kb_upload_v_chat" not in st.session_state:
+        st.session_state.kb_upload_v_chat = 0
+    if "kb_upload_v_sidebar" not in st.session_state:
+        st.session_state.kb_upload_v_sidebar = 0
 
     ok, health_msg = check_health()
     uid = str(st.session_state.user_id)
@@ -859,45 +1082,7 @@ def main() -> None:
         st.markdown(prompt)
 
     with st.chat_message("assistant", avatar="🧠"):
-        with st.spinner("Thinking…"):
-            t0 = time.perf_counter()
-            try:
-                r = api_post(
-                    "/api/v1/chat",
-                    {
-                        "session_id": sid,
-                        "user_id": uid,
-                        "message": prompt,
-                    },
-                )
-            except requests.RequestException as e:
-                st.error(
-                    f"**Cannot reach the API.** Is it running?\n\n`{e}`"
-                )
-                return
-
-        if r.status_code != 200:
-            st.error(f"Chat failed ({r.status_code}): {r.text}")
-            return
-
-        data = r.json()
-        answer = data.get("response") or ""
-        st.markdown(answer)
-
-        lat = data.get("latency_seconds")
-        if lat is None:
-            lat = round(time.perf_counter() - t0, 2)
-        st.markdown(
-            f'<p class="cf-latency">⚡ {lat}s</p>',
-            unsafe_allow_html=True,
-        )
-        st.session_state.messages.append({"role": "assistant", "content": answer})
-        st.session_state.last_sources = data.get("sources") or []
-        st.session_state.last_agent_log = data.get("agent_log") or []
-        st.session_state.last_summary = data.get("conversation_summary") or ""
-        st.session_state.last_latency = lat
-
-        render_source_pills(st.session_state.last_sources)
+        run_streaming_chat(sid, uid, prompt)
 
 
 if __name__ == "__main__":

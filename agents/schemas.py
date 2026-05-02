@@ -26,3 +26,7 @@ class MemoryItem(BaseModel):
 
 class MemoryExtractionResult(BaseModel):
     items: list[MemoryItem] = Field(default_factory=list)
+
+
+class QueryDecompositionResult(BaseModel):
+    sub_queries: list[str] = Field(default_factory=list)
