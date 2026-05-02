@@ -7,13 +7,17 @@ from datetime import datetime
 from typing import Optional
 from uuid import uuid4
 
+from config import settings
 from core.models import ChatMessage, MessageRole, Session
 
 
 class MemoryStore:
-    def __init__(self, db_path: str = "./data/memory.db"):
-        os.makedirs(os.path.dirname(db_path), exist_ok=True)
-        self.db_path = db_path
+    def __init__(self, db_path: str | None = None):
+        path = db_path or settings.sqlite_db_path
+        parent = os.path.dirname(os.path.abspath(path))
+        if parent:
+            os.makedirs(parent, exist_ok=True)
+        self.db_path = path
         self._init_db()
 
     # ------------------------------------------------------------------

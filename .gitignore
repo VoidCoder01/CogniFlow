@@ -12,3 +12,4 @@ data/
 .idea/
 .vscode/
 *.log
+.cursor/
