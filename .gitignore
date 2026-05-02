@@ -1,4 +1,6 @@
 __pycache__/
+*.pyc
+*.pyo
 *.py[cod]
 *.egg-info/
 dist/
@@ -13,3 +15,6 @@ data/
 .vscode/
 *.log
 .cursor/
+.pytest_cache/
+htmlcov/
+.coverage
