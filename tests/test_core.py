@@ -46,10 +46,14 @@ def test_document_processor_upload_disambiguates_same_filename(tmp_path):
         md,
         original_filename="README.md",
         doc_instance_id=uid,
+        session_id="sess-chat-1",
+        content_hash="abc123",
     )
     assert chunks[0].metadata.source == "README.md · 11111111"
     assert chunks[0].metadata.original_filename == "README.md"
     assert chunks[0].metadata.doc_instance_id == uid
+    assert chunks[0].metadata.session_id == "sess-chat-1"
+    assert chunks[0].metadata.content_hash == "abc123"
     assert "11111111" in chunks[0].metadata.title
 
 

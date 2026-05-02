@@ -74,6 +74,10 @@ class DocumentMetadata(BaseModel):
     # API uploads: disambiguate same filename (e.g. two README.md) and avoid temp paths in citations
     original_filename: str = ""
     doc_instance_id: str = ""
+    # Vector scope: chunks belong to one chat session (or "__global__" for CLI ingest)
+    session_id: str = ""
+    # Content-level dedupe key (sha256) for "do not re-index same file bytes"
+    content_hash: str = ""
 
 
 class DocumentChunk(BaseModel):

@@ -57,6 +57,8 @@ class VectorStore:
                     "total_chunks": m.total_chunks,
                     "original_filename": m.original_filename or "",
                     "doc_instance_id": m.doc_instance_id or "",
+                    "session_id": m.session_id or "",
+                    "content_hash": m.content_hash or "",
                 }
             )
 
@@ -162,8 +164,27 @@ class VectorStore:
     # Admin
     # ------------------------------------------------------------------
 
-    def get_collection_stats(self) -> dict:
-        return {"name": self.collection_name, "count": self.collection.count()}
+    def get_collection_stats(self, session_id: Optional[str] = None) -> dict:
+        """Total count, or count of chunks tagged with this session_id."""
+        if not (session_id or "").strip():
+            return {"name": self.collection_name, "count": self.collection.count()}
+        sid = session_id.strip()
+        res = self.collection.get(where={"session_id": sid})
+        ids = res.get("ids") if res else None
+        n = len(ids) if ids else 0
+        return {"name": self.collection_name, "count": n, "session_id": sid}
+
+    def has_document(self, session_id: str, content_hash: str) -> bool:
+        sid = (session_id or "").strip()
+        digest = (content_hash or "").strip()
+        if not sid or not digest:
+            return False
+        res = self.collection.get(
+            where={"$and": [{"session_id": sid}, {"content_hash": digest}]},
+            limit=1,
+        )
+        ids = res.get("ids") if res else None
+        return bool(ids)
 
     def delete_collection(self):
         self._client.delete_collection(self.collection_name)

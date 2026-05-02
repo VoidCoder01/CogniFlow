@@ -4,11 +4,12 @@ import logging
 import os
 import tempfile
 import time
+import hashlib
 from uuid import uuid4
 from pathlib import Path
 from typing import Annotated, Any, Iterator
 
-from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile
 from fastapi.responses import StreamingResponse
 
 from agents.graph_state import agent_state_to_graph, graph_to_agent_state
@@ -338,8 +339,16 @@ def chat_stream(
 @router.post("/documents/upload", response_model=DocumentUploadResponse)
 async def upload_document(
     file: UploadFile = File(...),
+    session_id: str = Form(..., description="Chat session to attach this index to"),
     store=Depends(get_vector_store),
+    mem: MemoryStore = Depends(get_memory_store),
 ):
+    sid = (session_id or "").strip()
+    if not sid:
+        raise HTTPException(status_code=422, detail="session_id is required")
+    if mem.get_session(sid) is None:
+        raise HTTPException(status_code=404, detail="Session not found")
+
     suffix = Path(file.filename or "upload").suffix.lower()
     allowed = {".pdf", ".md", ".markdown", ".html", ".htm"}
     if suffix not in allowed:
@@ -350,6 +359,13 @@ async def upload_document(
     data = await file.read()
     if not data:
         raise HTTPException(status_code=400, detail="Empty file")
+    content_hash = hashlib.sha256(data).hexdigest()
+    if store.has_document(sid, content_hash):
+        return DocumentUploadResponse(
+            filename=file.filename or "upload",
+            num_chunks=0,
+            status="already_indexed",
+        )
 
     fd, tmp_path = tempfile.mkstemp(suffix=suffix)
     os.close(fd)
@@ -362,6 +378,8 @@ async def upload_document(
             tmp_path,
             original_filename=orig_name,
             doc_instance_id=doc_instance_id,
+            session_id=sid,
+            content_hash=content_hash,
         )
         if not chunks:
             raise HTTPException(status_code=422, detail="No extractable text from document")
@@ -383,8 +401,12 @@ async def upload_document(
 def stats(
     vstore: Annotated[object, Depends(get_vector_store)],
     store: Annotated[MemoryStore, Depends(get_memory_store)],
+    session_id: str | None = Query(
+        default=None,
+        description="If set, vector_store.count is scoped to chunks for this chat session",
+    ),
 ):
-    vs = vstore.get_collection_stats()
+    vs = vstore.get_collection_stats(session_id=session_id)
     counts = store.table_counts()
     return {
         "vector_store": vs,

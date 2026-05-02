@@ -71,6 +71,7 @@ def client(tmp_path, monkeypatch, clear_singletons):
     fake_vs.get_collection_stats = MagicMock(
         return_value={"name": "mock", "count": 0},
     )
+    fake_vs.has_document = MagicMock(return_value=False)
 
     def _vs():
         return fake_vs
@@ -145,20 +146,66 @@ def test_get_messages_nonexistent(client: TestClient):
     assert r.status_code == 404
 
 
+def test_upload_requires_session(client: TestClient):
+    r = client.post(
+        "/api/v1/documents/upload",
+        files={"file": ("x.md", b"# hi", "text/markdown")},
+    )
+    assert r.status_code == 422
+
+
+def test_upload_unknown_session(client: TestClient):
+    r = client.post(
+        "/api/v1/documents/upload",
+        files={"file": ("x.md", b"# hi", "text/markdown")},
+        data={"session_id": "00000000-0000-0000-0000-000000000000"},
+    )
+    assert r.status_code == 404
+
+
 def test_upload_unsupported_file(client: TestClient):
+    r_sess = client.post("/api/v1/sessions", json={"user_id": "u"})
+    sid = r_sess.json()["session_id"]
     r = client.post(
         "/api/v1/documents/upload",
         files={"file": ("t.xyz", b"data", "application/octet-stream")},
+        data={"session_id": sid},
     )
     assert r.status_code == 400
 
 
 def test_upload_empty_file(client: TestClient):
+    r_sess = client.post("/api/v1/sessions", json={"user_id": "u"})
+    sid = r_sess.json()["session_id"]
     r = client.post(
         "/api/v1/documents/upload",
         files={"file": ("empty.md", b"", "text/markdown")},
+        data={"session_id": sid},
     )
     assert r.status_code == 400
+
+
+def test_upload_duplicate_is_not_reindexed(client: TestClient):
+    from api.deps import get_vector_store
+
+    r_sess = client.post("/api/v1/sessions", json={"user_id": "u"})
+    sid = r_sess.json()["session_id"]
+    fake_vs = MagicMock()
+    fake_vs.has_document = MagicMock(return_value=True)
+    client.app.dependency_overrides[get_vector_store] = lambda: fake_vs
+    try:
+        r = client.post(
+            "/api/v1/documents/upload",
+            files={"file": ("dup.md", b"# Same", "text/markdown")},
+            data={"session_id": sid},
+        )
+    finally:
+        client.app.dependency_overrides.pop(get_vector_store, None)
+
+    assert r.status_code == 200
+    body = r.json()
+    assert body["status"] == "already_indexed"
+    assert body["num_chunks"] == 0
 
 
 def test_metrics_endpoint(client: TestClient):

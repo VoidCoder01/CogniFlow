@@ -6,6 +6,7 @@ from typing import Any
 from langchain_core.messages import HumanMessage, SystemMessage
 
 from agents.graph_state import CogniFlowState
+from agents.retrieval_hints import query_suggests_document_lookup
 from agents.schemas import RetrievalRoutingResult
 from core.llm_provider import get_chat_model
 
@@ -52,6 +53,21 @@ def retrieval_router_node(state: CogniFlowState) -> dict[str, Any]:
     if strategy not in allowed:
         strategy = _heuristic_strategy(intent, base_q)
 
+    sid = (state.get("session_id") or "").strip()
+    if strategy == "none" and sid:
+        if query_suggests_document_lookup(base_q):
+            strategy = "semantic"
+            rationale = f"{rationale} | session_doc_lookup".strip()
+        elif intent in (
+            "factual",
+            "follow_up",
+            "clarification",
+            "comparison",
+            "multi_part",
+        ) and len((base_q or "").strip()) > 8:
+            strategy = "semantic"
+            rationale = f"{rationale} | intent_needs_retrieval".strip()
+
     retrieved: list[dict[str, Any]] = []
     if strategy != "none":
         try:
@@ -59,12 +75,13 @@ def retrieval_router_node(state: CogniFlowState) -> dict[str, Any]:
 
             vs = VectorStore()
             q = base_q
+            filt: dict[str, str] | None = {"session_id": sid} if sid else None
             if strategy == "semantic":
-                retrieved = vs.semantic_search(q, top_k=5)
+                retrieved = vs.semantic_search(q, top_k=5, filter_metadata=filt)
             elif strategy == "keyword":
-                retrieved = vs.keyword_search(q, top_k=5)
+                retrieved = vs.keyword_search(q, top_k=5, filter_metadata=filt)
             else:
-                retrieved = vs.hybrid_search(q, top_k=5)
+                retrieved = vs.hybrid_search(q, top_k=5, filter_metadata=filt)
         except Exception as exc:
             logger.warning("Vector retrieval failed: %s", exc)
 

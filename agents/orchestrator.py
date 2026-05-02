@@ -19,6 +19,7 @@ from agents.graph_state import (
 from agents.memory_manager import memory_manager_node
 from agents.query_rewriting import query_rewriting_node
 from agents.query_understanding import query_understanding_node
+from agents.retrieval_hints import query_suggests_document_lookup
 from agents.retrieval_router import retrieval_router_node
 from config import settings
 from core.models import AgentState
@@ -56,7 +57,10 @@ def build_checkpointer() -> BaseCheckpointSaver:
 
 def route_after_understanding(state: CogniFlowState) -> RouteAfterUnderstanding:
     intent = (state.get("query_intent") or "").lower().strip()
-    if intent in ("greeting", "off_topic"):
+    user_q = str(state.get("user_query") or "")
+    if intent in ("greeting", "off_topic") and not query_suggests_document_lookup(
+        user_q
+    ):
         return "direct_synthesize"
     if state.get("needs_rewrite"):
         return "rewrite"

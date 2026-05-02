@@ -49,6 +49,12 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="Parse and chunk only; do not write to the vector store",
     )
+    parser.add_argument(
+        "--session-id",
+        default="__global__",
+        metavar="ID",
+        help="Tag all chunks with this session id (default: __global__ for shared corpus)",
+    )
     args = parser.parse_args(argv)
 
     targets = _collect_files(args.paths)
@@ -65,7 +71,7 @@ def main(argv: list[str] | None = None) -> int:
 
     total_chunks = 0
     for path in targets:
-        chunks = processor.process_file(path)
+        chunks = processor.process_file(path, session_id=args.session_id)
         total_chunks += len(chunks)
         if not args.dry_run and chunks:
             store.add_documents(chunks)

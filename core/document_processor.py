@@ -30,6 +30,8 @@ class DocumentProcessor:
         self.chunk_overlap = chunk_overlap or settings.chunk_overlap
         self._upload_original_name: str | None = None
         self._upload_doc_id: str | None = None
+        self._ingest_session_id: str = ""
+        self._ingest_content_hash: str = ""
 
     def process_file(
         self,
@@ -37,6 +39,8 @@ class DocumentProcessor:
         *,
         original_filename: Optional[str] = None,
         doc_instance_id: Optional[str] = None,
+        session_id: Optional[str] = None,
+        content_hash: Optional[str] = None,
     ) -> list[DocumentChunk]:
         p = Path(path).expanduser().resolve()
         if not p.is_file():
@@ -44,24 +48,37 @@ class DocumentProcessor:
 
         self._upload_original_name = (original_filename or "").strip() or None
         self._upload_doc_id = (doc_instance_id or "").strip() or None
+        self._ingest_session_id = (session_id or "").strip()
+        self._ingest_content_hash = (content_hash or "").strip()
         try:
             suffix = p.suffix.lower()
             if suffix == ".pdf":
-                return self._process_pdf(p)
-            if suffix in (".md", ".markdown"):
-                return self._process_markdown(p)
-            if suffix in (".html", ".htm"):
-                return self._process_html(p)
-
-            raise ValueError(f"Unsupported document type: {suffix} ({p})")
+                out = self._process_pdf(p)
+            elif suffix in (".md", ".markdown"):
+                out = self._process_markdown(p)
+            elif suffix in (".html", ".htm"):
+                out = self._process_html(p)
+            else:
+                raise ValueError(f"Unsupported document type: {suffix} ({p})")
+            for c in out:
+                c.metadata.session_id = self._ingest_session_id
+                c.metadata.content_hash = self._ingest_content_hash
+            return out
         finally:
             self._upload_original_name = None
             self._upload_doc_id = None
+            self._ingest_session_id = ""
+            self._ingest_content_hash = ""
 
-    def process_paths(self, paths: list[str | Path]) -> list[DocumentChunk]:
+    def process_paths(
+        self,
+        paths: list[str | Path],
+        *,
+        session_id: Optional[str] = None,
+    ) -> list[DocumentChunk]:
         out: list[DocumentChunk] = []
         for raw in paths:
-            out.extend(self.process_file(raw))
+            out.extend(self.process_file(raw, session_id=session_id))
         return out
 
     def _process_pdf(self, path: Path) -> list[DocumentChunk]:
