@@ -13,14 +13,28 @@ class Settings(BaseSettings):
         extra="ignore",
     )
 
-    # LLM
-    llm_provider: str = Field(default="groq", description="groq | openai | ollama")
-    groq_api_key: str = ""
+    # LLM — use LLM_PROVIDER=openai | anthropic | groq | ollama
+    llm_provider: str = Field(
+        default="openai",
+        description="openai | anthropic | groq | ollama",
+    )
     openai_api_key: str = ""
+    anthropic_api_key: str = ""
+    groq_api_key: str = ""
     ollama_base_url: str = "http://localhost:11434"
-    llm_model: str = "llama-3.1-8b-instant"
+    # Provider-specific defaults (override with OPENAI_MODEL / ANTHROPIC_MODEL / LLM_MODEL)
+    openai_model: str = "gpt-4o-mini"
+    anthropic_model: str = "claude-sonnet-4-20250514"
+    llm_model: str = ""  # fallback for groq / ollama when provider-specific model unset
     llm_temperature: float = 0.2
     llm_max_tokens: int = 2048
+
+    # LangGraph checkpointing: memory (default) or sqlite (persistent thread state)
+    checkpoint_backend: str = Field(
+        default="memory",
+        description="memory | sqlite",
+    )
+    checkpoint_sqlite_path: str = "./data/checkpoints.db"
 
     # Embeddings & stores
     embedding_model: str = "sentence-transformers/all-MiniLM-L6-v2"
