@@ -1,11 +1,12 @@
 """
-Streamlit UI for CogniFlow: chat, sessions, document upload, and API diagnostics.
-Set API_BASE_URL=http://api:8000 when the UI runs in Docker (see docker-compose.yml).
+CogniFlow — minimal Streamlit chat UI for the FastAPI RAG backend.
 """
 
 from __future__ import annotations
 
 import os
+import time
+import uuid
 from typing import Any
 
 import requests
@@ -13,36 +14,45 @@ import streamlit as st
 
 DEFAULT_API = os.environ.get("API_BASE_URL", "http://127.0.0.1:8000").rstrip("/")
 
+# --- Minimal styling (sidebar tone, status, hide footer) --------------------
+_CSS = """
+<style>
+div[data-testid="stSidebar"] { background: #1e293b !important; }
+div[data-testid="stSidebar"] label { color: #e2e8f0 !important; }
+div[data-testid="stSidebar"] .stTextInput input {
+    background: #0f172a !important; color: #f8fafc !important;
+    border-color: #334155 !important;
+}
+.status-ok { color: #22c55e; font-weight: 600; }
+.status-bad { color: #ef4444; font-weight: 600; }
+footer { visibility: hidden; }
+[data-testid="stDecoration"] { display: none; }
+/* Chat history — compact trash button column */
+div[data-testid="stSidebar"] div[data-testid="column"] button[kind="secondary"] {
+    min-height: 2rem; padding: 0 0.35rem; font-size: 1rem; line-height: 1;
+    border: none; background: transparent; color: #94a3b8;
+}
+div[data-testid="stSidebar"] div[data-testid="column"] button[kind="secondary"]:hover {
+    color: #f87171; background: rgba(248,113,113,0.12);
+}
+</style>
+"""
 
-def _inject_style() -> None:
-    st.markdown(
-        """
-        <style>
-        .block-container { padding-top: 1.25rem; padding-bottom: 2rem; max-width: 960px; }
-        div[data-testid="stSidebar"] { background: linear-gradient(180deg, #0f1419 0%, #151b24 100%); }
-        div[data-testid="stSidebar"] label { color: #c8d0dc !important; }
-        .cf-badge { display: inline-block; padding: 0.15rem 0.5rem; border-radius: 6px;
-            font-size: 0.75rem; font-weight: 600; letter-spacing: 0.02em; }
-        .cf-ok { background: #1a3d2e; color: #7dffb3; }
-        .cf-bad { background: #3d1a1a; color: #ff9d9d; }
-        </style>
-        """,
-        unsafe_allow_html=True,
-    )
+
+def _inject_css() -> None:
+    st.markdown(_CSS, unsafe_allow_html=True)
 
 
 def api_base() -> str:
     return (st.session_state.get("api_base") or DEFAULT_API).rstrip("/")
 
 
-def api_post(path: str, json_body: dict | None = None, **kwargs: Any):
-    url = f"{api_base()}{path}"
-    return requests.post(url, json=json_body, timeout=600, **kwargs)
+def api_get(path: str, timeout: int = 30) -> requests.Response:
+    return requests.get(f"{api_base()}{path}", timeout=timeout)
 
 
-def api_get(path: str, timeout: int = 60):
-    url = f"{api_base()}{path}"
-    return requests.get(url, timeout=timeout)
+def api_post(path: str, json_body: dict | None = None, **kw: Any) -> requests.Response:
+    return requests.post(f"{api_base()}{path}", json=json_body, timeout=600, **kw)
 
 
 def check_health() -> tuple[bool, str]:
@@ -52,154 +62,236 @@ def check_health() -> tuple[bool, str]:
             return True, "Connected"
         return False, f"HTTP {r.status_code}"
     except requests.RequestException as e:
-        return False, str(e)[:80]
+        return False, str(e)[:120]
 
 
-def fetch_user_sessions(user_id: str) -> list[dict[str, Any]]:
+def fetch_chunk_count() -> int | None:
     try:
-        r = api_get(f"/api/v1/users/{user_id}/sessions")
+        r = api_get("/api/v1/stats", timeout=5)
+        if r.ok:
+            return int(r.json().get("vector_store", {}).get("count", 0))
+    except requests.RequestException:
+        pass
+    return None
+
+
+def first_user_preview(session_id: str) -> tuple[str, str]:
+    """Return (preview_label, iso_timestamp_hint) for sidebar row."""
+    try:
+        r = api_get(f"/api/v1/sessions/{session_id}/messages", timeout=15)
+        if r.status_code != 200:
+            return "New conversation", ""
+        raw = r.json().get("messages") or []
+        ts = ""
+        if raw:
+            ts = str(raw[0].get("timestamp") or "")[:19]
+        for m in raw:
+            if m.get("role") == "user":
+                c = (m.get("content") or "").strip()
+                if c:
+                    prev = c[:40] + ("…" if len(c) > 40 else "")
+                    return prev, ts
+        return "New conversation", ts
+    except requests.RequestException:
+        return "New conversation", ""
+
+
+def build_history_rows(user_id: str, limit: int = 15) -> list[dict[str, Any]]:
+    try:
+        r = api_get(f"/api/v1/users/{user_id}/sessions", timeout=15)
+        if r.status_code != 200:
+            return []
+        rows = list(r.json().get("sessions") or [])
     except requests.RequestException:
         return []
-    if r.status_code != 200:
-        return []
-    data = r.json()
-    return list(data.get("sessions") or [])
 
-
-def render_sources(sources: list[dict[str, Any]] | None) -> None:
-    if not sources:
-        st.caption("No document sources for this reply.")
-        return
-    rows: list[dict[str, Any]] = []
-    for s in sources[:12]:
-        rows.append(
+    out: list[dict[str, Any]] = []
+    for row in rows[:limit]:
+        sid = row.get("session_id") or ""
+        if not sid:
+            continue
+        preview, _ = first_user_preview(sid)
+        ts = row.get("updated_at") or row.get("created_at") or ""
+        if isinstance(ts, str) and len(ts) >= 16:
+            ts_short = ts[:16].replace("T", " ")
+        else:
+            ts_short = str(ts)[:16] if ts else ""
+        out.append(
             {
-                "Title": s.get("title") or "—",
-                "Relevance": f"{float(s.get('relevance') or 0):.0%}",
-                "Source": (s.get("source") or "")[:64] + ("…" if len(str(s.get("source") or "")) > 64 else ""),
+                "session_id": sid,
+                "preview": preview,
+                "ts": ts_short,
             }
         )
-    st.dataframe(rows, use_container_width=True, hide_index=True, height=min(220, 36 + len(rows) * 36))
+    return out
 
 
-def sidebar_connection(ok: bool, msg: str) -> None:
-    st.subheader("Connection")
-    badge = f'<span class="cf-badge cf-{"ok" if ok else "bad"}">{msg}</span>'
-    st.markdown(badge, unsafe_allow_html=True)
-    if st.button("Refresh status", use_container_width=True):
-        st.rerun()
+def load_session_messages(session_id: str) -> None:
+    try:
+        r = api_get(f"/api/v1/sessions/{session_id}/messages", timeout=30)
+        if r.status_code != 200:
+            st.session_state.messages = []
+            st.error("Could not load messages for this session.")
+            return
+        raw = r.json().get("messages") or []
+        st.session_state.messages = [
+            {"role": m["role"], "content": m["content"]} for m in raw
+        ]
+    except requests.RequestException as e:
+        st.session_state.messages = []
+        st.error(f"Could not load messages: {e}")
 
 
-def sidebar_identity() -> None:
-    st.subheader("Identity")
-    st.text_input("User ID", key="user_id", help="Used for sessions and long-term memory.")
+def render_sources(sources: list[dict] | None) -> None:
+    if not sources:
+        st.caption("No sources returned for this reply.")
+        return
+    for s in sources[:12]:
+        title = s.get("title") or "—"
+        src = (s.get("source") or "").strip()
+        rel = float(s.get("relevance") or 0)
+        if src and src not in title:
+            st.markdown(f"- **{title}** — `{src}` — {rel:.0%}")
+        else:
+            st.markdown(f"- **{title}** — {rel:.0%}")
 
 
-def sidebar_sessions() -> None:
-    st.subheader("Session")
-    uid = st.session_state.get("user_id") or "demo_user"
-    sessions = fetch_user_sessions(uid)
+def render_agent_log(log: list[dict] | None) -> None:
+    if not log:
+        st.caption("No agent log entries.")
+        return
+    for entry in log:
+        node = entry.get("node", "unknown")
+        lines = [f"**{node}**"]
+        for k, v in entry.items():
+            if k == "node":
+                continue
+            lines.append(f"  - `{k}`: `{v}`")
+        st.markdown("\n".join(lines))
 
-    if sessions:
-        labels: list[str] = []
-        id_by_label: dict[str, str] = {}
-        for row in sessions:
-            sid = row.get("session_id") or ""
-            ts = row.get("updated_at") or row.get("created_at") or ""
-            short = f"{sid[:8]}…" if len(sid) > 12 else sid
-            label = f"{short} · {ts[:19] if isinstance(ts, str) else ts}"
-            labels.append(label)
-            id_by_label[label] = sid
 
-        current = st.session_state.get("session_id") or ""
-        default_idx = 0
-        for i, row in enumerate(sessions):
-            if (row.get("session_id") or "") == current:
-                default_idx = i
-                break
+def sidebar_branding() -> None:
+    st.markdown("### 🧠 CogniFlow")
+    st.caption("Conversational RAG · LangGraph · ChromaDB")
 
-        choice = st.selectbox(
-            "Your sessions",
-            options=labels,
-            index=min(default_idx, len(labels) - 1) if labels else 0,
-            key="session_pick",
-        )
-        if choice and id_by_label.get(choice):
-            if st.button("Open selected session", use_container_width=True):
-                sid = id_by_label[choice]
+
+def sidebar_status(ok: bool, msg: str) -> None:
+    cls = "status-ok" if ok else "status-bad"
+    dot = "🟢" if ok else "🔴"
+    st.markdown(f'<p class="{cls}">{dot} {msg}</p>', unsafe_allow_html=True)
+
+
+def sidebar_new_chat(user_id: str) -> None:
+    st.subheader("New Chat")
+    if st.button("New Chat", use_container_width=True, type="primary"):
+        uid = (user_id or "").strip()
+        if not uid:
+            uid = f"guest_{uuid.uuid4().hex[:8]}"
+            st.session_state.user_id = uid
+        try:
+            r = api_post("/api/v1/sessions", {"user_id": uid})
+            if r.status_code == 200:
+                data = r.json()
+                st.session_state.session_id = data["session_id"]
+                st.session_state.messages = []
+                st.session_state.last_sources = []
+                st.session_state.last_agent_log = []
+                st.session_state.last_summary = ""
+                st.session_state.last_latency = None
+                st.rerun()
+            else:
+                st.error(r.text)
+        except requests.RequestException as e:
+            st.error(f"Cannot create session: {e}")
+
+
+def _clear_active_if_dismissed(active_sid: str) -> None:
+    if active_sid and active_sid in st.session_state.dismissed_sessions:
+        st.session_state.session_id = ""
+        st.session_state.messages = []
+        st.session_state.last_sources = []
+        st.session_state.last_agent_log = []
+        st.session_state.last_summary = ""
+        st.session_state.last_latency = None
+
+
+def sidebar_history(user_id: str, active_sid: str) -> None:
+    """ChatGPT-style list: open chat + trash per row; Clear all (UI-only hide on this browser)."""
+    h_left, h_right = st.columns([2, 1])
+    with h_left:
+        st.markdown("**Chat History**")
+    with h_right:
+        if st.button(
+            "Clear all",
+            key="hist_clear_all",
+            use_container_width=True,
+            help="Remove every chat from this sidebar (UI only — reload page to show API list again)",
+        ):
+            for r in build_history_rows(user_id):
+                st.session_state.dismissed_sessions.add(r["session_id"])
+            _clear_active_if_dismissed(active_sid)
+            st.rerun()
+
+    rows = [
+        r
+        for r in build_history_rows(user_id)
+        if r["session_id"] not in st.session_state.dismissed_sessions
+    ]
+    if not rows:
+        st.caption("No past sessions yet.")
+        return
+
+    for row in rows:
+        sid = row["session_id"]
+        label = f"{row['preview']} · {row['ts']}" if row["ts"] else row["preview"]
+        is_active = sid == active_sid
+        btn_label = f"{'● ' if is_active else ''}{label}"
+        col_chat, col_del = st.columns([5, 1])
+        with col_chat:
+            if st.button(btn_label, key=f"hist_{sid}", use_container_width=True):
                 st.session_state.session_id = sid
-                try:
-                    r = api_get(f"/api/v1/sessions/{sid}/messages")
-                except requests.RequestException as e:
+                load_session_messages(sid)
+                st.session_state.last_sources = []
+                st.session_state.last_agent_log = []
+                st.session_state.last_summary = ""
+                st.session_state.last_latency = None
+                st.rerun()
+        with col_del:
+            if st.button(
+                "🗑️",
+                key=f"hist_del_{sid}",
+                help="Remove from sidebar (UI only)",
+                use_container_width=True,
+                type="secondary",
+            ):
+                st.session_state.dismissed_sessions.add(sid)
+                if sid == active_sid:
+                    st.session_state.session_id = ""
                     st.session_state.messages = []
-                    st.error(f"Cannot reach API: {e}")
-                else:
-                    if r.status_code == 200:
-                        raw = r.json().get("messages") or []
-                        st.session_state.messages = [
-                            {"role": m["role"], "content": m["content"]} for m in raw
-                        ]
-                        st.rerun()
-                    else:
-                        st.session_state.messages = []
-                        st.error(r.text)
-
-    c1, c2 = st.columns(2)
-    with c1:
-        if st.button("New session", use_container_width=True, type="primary"):
-            try:
-                r = api_post("/api/v1/sessions", {"user_id": uid})
-            except requests.RequestException as e:
-                st.error(
-                    "Cannot reach the API. Start it in another terminal: "
-                    f"`python main.py` — ({e})"
-                )
-            else:
-                if r.status_code == 200:
-                    data = r.json()
-                    st.session_state.session_id = data["session_id"]
-                    st.session_state.messages = []
-                    st.success("Session created.")
-                    st.rerun()
-                else:
-                    st.error(r.text)
-    with c2:
-        if st.button("Load history", use_container_width=True, disabled=not st.session_state.get("session_id")):
-            sid = st.session_state.session_id
-            try:
-                r = api_get(f"/api/v1/sessions/{sid}/messages")
-            except requests.RequestException as e:
-                st.error(f"Cannot reach API: {e}")
-            else:
-                if r.status_code == 200:
-                    raw = r.json().get("messages") or []
-                    st.session_state.messages = [
-                        {"role": m["role"], "content": m["content"]} for m in raw
-                    ]
-                    st.toast("History loaded from server.")
-                    st.rerun()
-                else:
-                    st.error(r.text)
-
-    st.text_input(
-        "Session ID",
-        key="session_id",
-        help="Paste a session UUID to resume, or use New session.",
-    )
+                    st.session_state.last_sources = []
+                    st.session_state.last_agent_log = []
+                    st.session_state.last_summary = ""
+                    st.session_state.last_latency = None
+                st.rerun()
 
 
-def sidebar_documents() -> None:
-    st.subheader("Knowledge base")
+def sidebar_upload() -> None:
+    st.subheader("Upload Document")
     up = st.file_uploader(
-        "Upload PDF, Markdown, or HTML",
+        "File",
         type=["pdf", "md", "markdown", "html", "htm"],
         label_visibility="collapsed",
     )
-    if up and st.button("Index file", use_container_width=True):
+    if st.button("Index", use_container_width=True, disabled=up is None):
+        if not up:
+            return
         files = {"file": (up.name, up.getvalue(), up.type or "application/octet-stream")}
-        url = f"{api_base()}/api/v1/documents/upload"
         try:
-            r = requests.post(url, files=files, timeout=600)
+            r = requests.post(
+                f"{api_base()}/api/v1/documents/upload",
+                files=files,
+                timeout=600,
+            )
             if r.status_code == 200:
                 j = r.json()
                 st.success(f"Indexed **{j.get('num_chunks', 0)}** chunks from `{j.get('filename')}`")
@@ -208,47 +300,31 @@ def sidebar_documents() -> None:
         except requests.RequestException as e:
             st.error(str(e))
 
-
-def sidebar_diagnostics() -> None:
-    with st.expander("API & stats", expanded=False):
-        st.text_input("API base URL", key="api_base")
-        if st.button("Fetch /stats"):
-            try:
-                r = api_get("/api/v1/stats")
-            except requests.RequestException as e:
-                st.error(str(e))
-            else:
-                if r.ok:
-                    st.json(r.json())
-                else:
-                    st.error(r.text)
-        if st.button("Fetch /metrics"):
-            try:
-                r = api_get("/api/v1/metrics")
-            except requests.RequestException as e:
-                st.error(str(e))
-            else:
-                if r.ok:
-                    st.json(r.json())
-                else:
-                    st.error(r.text)
+    n = fetch_chunk_count()
+    if n is not None:
+        st.caption(f"**{n}** chunks indexed (vector store)")
 
 
-def render_empty_state(api_reachable: bool) -> None:
-    if not api_reachable:
-        st.warning(
-            f"No API at **{api_base()}**. Start the backend in another terminal: "
-            "`python main.py` (or `uvicorn main:app --host 0.0.0.0 --port 8000`), "
-            "then refresh the sidebar or reload this page."
+def sidebar_settings() -> None:
+    with st.expander("Settings", expanded=False):
+        st.text_input("User ID", key="user_id")
+        st.text_input("API base URL", key="api_base", placeholder=DEFAULT_API)
+
+
+def welcome_empty(api_ok: bool) -> None:
+    if not api_ok:
+        st.error(
+            f"**API unreachable** at `{api_base()}`. Start the backend: "
+            "`python main.py` or `uvicorn main:app --host 0.0.0.0 --port 8000`."
         )
-    st.markdown(
+    st.info(
         """
-        **CogniFlow** answers using your indexed documents and remembers context per user.
+**Welcome.** Quick start:
 
-        1. Ensure the API is running (`python main.py` or Docker).
-        2. Create a **New session** in the sidebar (or open an existing one).
-        3. Optionally **Index file** to add documents to the vector store.
-        """
+1. Start the API (`python main.py`)
+2. Click **New Chat** to begin
+3. Upload documents to build your knowledge base
+        """.strip()
     )
 
 
@@ -259,7 +335,7 @@ def main() -> None:
         layout="wide",
         initial_sidebar_state="expanded",
     )
-    _inject_style()
+    _inject_css()
 
     if "user_id" not in st.session_state:
         st.session_state.user_id = "demo_user"
@@ -269,33 +345,63 @@ def main() -> None:
         st.session_state.messages = []
     if "api_base" not in st.session_state:
         st.session_state.api_base = DEFAULT_API
+    if "last_sources" not in st.session_state:
+        st.session_state.last_sources = []
+    if "last_agent_log" not in st.session_state:
+        st.session_state.last_agent_log = []
+    if "last_summary" not in st.session_state:
+        st.session_state.last_summary = ""
+    if "last_latency" not in st.session_state:
+        st.session_state.last_latency = None
+    if "dismissed_sessions" not in st.session_state:
+        st.session_state.dismissed_sessions = set()
 
-    st.title("CogniFlow")
-    st.caption("Conversational RAG · LangGraph · ChromaDB")
-
-    ok_api, health_msg = check_health()
+    ok, health_msg = check_health()
+    uid = str(st.session_state.user_id)
+    sid = str(st.session_state.session_id).strip()
 
     with st.sidebar:
-        sidebar_connection(ok_api, health_msg)
+        sidebar_branding()
+        sidebar_status(ok, health_msg)
         st.divider()
-        sidebar_identity()
+        sidebar_new_chat(uid)
         st.divider()
-        sidebar_sessions()
+        sidebar_history(uid, sid)
         st.divider()
-        sidebar_documents()
+        sidebar_upload()
         st.divider()
-        sidebar_diagnostics()
+        sidebar_settings()
 
-    if not st.session_state.session_id.strip():
-        render_empty_state(ok_api)
+    st.markdown("### 🧠 CogniFlow")
+    st.caption("Conversational RAG · LangGraph · ChromaDB")
+
+    if not sid:
+        welcome_empty(ok)
         return
 
     for m in st.session_state.messages:
         with st.chat_message(m["role"]):
             st.markdown(m["content"])
 
-    prompt = st.chat_input("Ask something about your documents…")
+    prompt = st.chat_input("Message…")
     if not prompt:
+        if st.session_state.last_sources or st.session_state.last_agent_log or (
+            st.session_state.last_summary
+        ):
+            st.divider()
+            lat = st.session_state.last_latency
+            if lat is not None:
+                st.caption(f"⚡ Last response: **{lat}s**")
+            with st.expander("📚 Sources", expanded=False):
+                render_sources(st.session_state.last_sources)
+            with st.expander("🔍 Agent Decisions", expanded=False):
+                render_agent_log(st.session_state.last_agent_log)
+            with st.expander("📝 Conversation Summary", expanded=False):
+                summ = (st.session_state.last_summary or "").strip()
+                if summ:
+                    st.markdown(summ)
+                else:
+                    st.caption("No summary yet (appears after longer conversations).")
         return
 
     st.session_state.messages.append({"role": "user", "content": prompt})
@@ -303,48 +409,52 @@ def main() -> None:
         st.markdown(prompt)
 
     with st.chat_message("assistant"):
-        with st.spinner("Running agents…"):
+        with st.spinner("Thinking..."):
+            t0 = time.perf_counter()
             try:
                 r = api_post(
                     "/api/v1/chat",
                     {
-                        "session_id": st.session_state.session_id.strip(),
-                        "user_id": st.session_state.user_id,
+                        "session_id": sid,
+                        "user_id": uid,
                         "message": prompt,
                     },
                 )
             except requests.RequestException as e:
                 st.error(
-                    "Cannot reach the API. Is `python main.py` (or Docker) running? "
-                    f"Details: {e}"
+                    f"**Cannot reach the API.** Is it running?\n\n`{e}`"
                 )
-                st.session_state.messages.pop()
                 return
+
         if r.status_code != 200:
-            st.error(r.text)
-            st.session_state.messages.pop()
+            st.error(f"Chat failed ({r.status_code}): {r.text}")
             return
 
         data = r.json()
-        text = data.get("response") or ""
-        st.markdown(text)
+        answer = data.get("response") or ""
+        st.markdown(answer)
 
         lat = data.get("latency_seconds")
-        if lat is not None:
-            st.caption(f"Latency: **{lat}s**")
+        if lat is None:
+            lat = round(time.perf_counter() - t0, 2)
+        st.caption(f"⚡ {lat}s")
 
-        summ = (data.get("conversation_summary") or "").strip()
-        if summ:
-            with st.expander("Conversation summary (rolling)", expanded=False):
+        st.session_state.messages.append({"role": "assistant", "content": answer})
+        st.session_state.last_sources = data.get("sources") or []
+        st.session_state.last_agent_log = data.get("agent_log") or []
+        st.session_state.last_summary = data.get("conversation_summary") or ""
+        st.session_state.last_latency = lat
+
+        with st.expander("📚 Sources", expanded=False):
+            render_sources(st.session_state.last_sources)
+        with st.expander("🔍 Agent Decisions", expanded=False):
+            render_agent_log(st.session_state.last_agent_log)
+        with st.expander("📝 Conversation Summary", expanded=False):
+            summ = (st.session_state.last_summary or "").strip()
+            if summ:
                 st.markdown(summ)
-
-        with st.expander("Sources", expanded=False):
-            render_sources(data.get("sources"))
-
-        with st.expander("Agent log", expanded=False):
-            st.json(data.get("agent_log") or [])
-
-        st.session_state.messages.append({"role": "assistant", "content": text})
+            else:
+                st.caption("No summary yet (appears after longer conversations).")
 
 
 if __name__ == "__main__":

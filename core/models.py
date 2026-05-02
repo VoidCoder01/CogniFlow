@@ -71,6 +71,9 @@ class DocumentMetadata(BaseModel):
     page_number: Optional[int] = None
     chunk_index: int = 0
     total_chunks: int = 1
+    # API uploads: disambiguate same filename (e.g. two README.md) and avoid temp paths in citations
+    original_filename: str = ""
+    doc_instance_id: str = ""
 
 
 class DocumentChunk(BaseModel):

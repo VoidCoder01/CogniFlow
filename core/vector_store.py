@@ -55,6 +55,8 @@ class VectorStore:
                     "page_number": m.page_number if m.page_number is not None else 0,
                     "chunk_index": m.chunk_index,
                     "total_chunks": m.total_chunks,
+                    "original_filename": m.original_filename or "",
+                    "doc_instance_id": m.doc_instance_id or "",
                 }
             )
 

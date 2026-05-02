@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 import re
 from pathlib import Path
+from typing import Optional
 
 from bs4 import BeautifulSoup
 from pypdf import PdfReader
@@ -27,21 +28,35 @@ class DocumentProcessor:
     ):
         self.chunk_size = chunk_size or settings.chunk_size
         self.chunk_overlap = chunk_overlap or settings.chunk_overlap
+        self._upload_original_name: str | None = None
+        self._upload_doc_id: str | None = None
 
-    def process_file(self, path: str | Path) -> list[DocumentChunk]:
+    def process_file(
+        self,
+        path: str | Path,
+        *,
+        original_filename: Optional[str] = None,
+        doc_instance_id: Optional[str] = None,
+    ) -> list[DocumentChunk]:
         p = Path(path).expanduser().resolve()
         if not p.is_file():
             raise FileNotFoundError(str(p))
 
-        suffix = p.suffix.lower()
-        if suffix == ".pdf":
-            return self._process_pdf(p)
-        if suffix in (".md", ".markdown"):
-            return self._process_markdown(p)
-        if suffix in (".html", ".htm"):
-            return self._process_html(p)
+        self._upload_original_name = (original_filename or "").strip() or None
+        self._upload_doc_id = (doc_instance_id or "").strip() or None
+        try:
+            suffix = p.suffix.lower()
+            if suffix == ".pdf":
+                return self._process_pdf(p)
+            if suffix in (".md", ".markdown"):
+                return self._process_markdown(p)
+            if suffix in (".html", ".htm"):
+                return self._process_html(p)
 
-        raise ValueError(f"Unsupported document type: {suffix} ({p})")
+            raise ValueError(f"Unsupported document type: {suffix} ({p})")
+        finally:
+            self._upload_original_name = None
+            self._upload_doc_id = None
 
     def process_paths(self, paths: list[str | Path]) -> list[DocumentChunk]:
         out: list[DocumentChunk] = []
@@ -73,6 +88,7 @@ class DocumentProcessor:
                     chunk_index=0,
                     total_chunks=1,
                 )
+                self._stamp_upload_metadata(path, title, meta_dm)
                 pieces.append(DocumentChunk(content=chunk_text, metadata=meta_dm))
 
         if not pieces:
@@ -102,6 +118,7 @@ class DocumentProcessor:
                     chunk_index=0,
                     total_chunks=1,
                 )
+                self._stamp_upload_metadata(path, title, meta_dm)
                 pieces.append(DocumentChunk(content=chunk_text, metadata=meta_dm))
 
         if not pieces:
@@ -141,6 +158,7 @@ class DocumentProcessor:
                 chunk_index=0,
                 total_chunks=1,
             )
+            self._stamp_upload_metadata(path, title, meta_dm)
             pieces.append(DocumentChunk(content=chunk_text, metadata=meta_dm))
 
         if not pieces:
@@ -156,6 +174,18 @@ class DocumentProcessor:
             c.metadata.chunk_index = i
             c.metadata.total_chunks = max(total, 1)
         return chunks
+
+    def _stamp_upload_metadata(self, path: Path, title: str, meta: DocumentMetadata) -> None:
+        """Replace temp paths with original filename + id so duplicate names stay distinct."""
+        if not self._upload_doc_id:
+            meta.source = str(path)
+            return
+        short = self._upload_doc_id.replace("-", "")[:8]
+        orig = self._upload_original_name or path.name
+        meta.original_filename = orig
+        meta.doc_instance_id = self._upload_doc_id
+        meta.source = f"{orig} · {short}"
+        meta.title = f"{title} · {short}"
 
     @staticmethod
     def _first_markdown_title(text: str) -> str | None:

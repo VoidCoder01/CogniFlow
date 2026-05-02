@@ -115,3 +115,63 @@ def test_stats(client: TestClient):
     r = client.get("/api/v1/stats")
     assert r.status_code == 200
     assert "vector_store" in r.json()
+
+
+def test_create_and_list_sessions(client: TestClient):
+    r1 = client.post("/api/v1/sessions", json={"user_id": "bob"})
+    r2 = client.post("/api/v1/sessions", json={"user_id": "bob"})
+    assert r1.status_code == 200 and r2.status_code == 200
+    lst = client.get("/api/v1/users/bob/sessions")
+    assert lst.status_code == 200
+    data = lst.json()
+    assert data["user_id"] == "bob"
+    assert len(data["sessions"]) == 2
+
+
+def test_chat_nonexistent_session(client: TestClient):
+    r = client.post(
+        "/api/v1/chat",
+        json={
+            "session_id": "00000000-0000-0000-0000-000000000000",
+            "user_id": "x",
+            "message": "hi",
+        },
+    )
+    assert r.status_code == 404
+
+
+def test_get_messages_nonexistent(client: TestClient):
+    r = client.get("/api/v1/sessions/bad-id-123/messages")
+    assert r.status_code == 404
+
+
+def test_upload_unsupported_file(client: TestClient):
+    r = client.post(
+        "/api/v1/documents/upload",
+        files={"file": ("t.xyz", b"data", "application/octet-stream")},
+    )
+    assert r.status_code == 400
+
+
+def test_upload_empty_file(client: TestClient):
+    r = client.post(
+        "/api/v1/documents/upload",
+        files={"file": ("empty.md", b"", "text/markdown")},
+    )
+    assert r.status_code == 400
+
+
+def test_metrics_endpoint(client: TestClient):
+    r = client.get("/api/v1/metrics")
+    assert r.status_code == 200
+    body = r.json()
+    for key in (
+        "chat_requests_total",
+        "upload_requests_total",
+        "errors_total",
+        "chat_latency_samples",
+        "chat_latency_avg_seconds",
+        "chat_latency_p95_seconds",
+        "last_updated_unix",
+    ):
+        assert key in body

@@ -1,4 +1,4 @@
-# Conversational RAG System with LangGraph Orchestration
+# CogniFlow — Conversational RAG with LangGraph Orchestration
 
 An intelligent conversational RAG (Retrieval-Augmented Generation) system that maintains persistent, context-aware conversations across multiple users using LangGraph-based agentic workflows.
 
@@ -83,7 +83,9 @@ START → Query Understanding
 
 ### Prerequisites
 - Python 3.10+
-- 4GB+ RAM (for embedding model)
+- 4GB+ RAM (for local CPU embeddings; API embeddings need less)
+
+**No GPU required.** Chat uses cloud LLMs via API keys (Gemini is the default provider; also OpenAI, Anthropic, Groq, OpenRouter). Local retrieval embeddings use **SentenceTransformer on CPU** by default (`EMBEDDING_DEVICE=cpu`). To avoid loading PyTorch for embeddings entirely, set `EMBEDDING_BACKEND=openai` and `OPENAI_API_KEY` (then clear or rename your Chroma data and re-ingest so vector dimensions match). `LLM_PROVIDER=ollama` is optional and assumes a capable local machine.
 
 ### 1. Clone and install
 
@@ -91,9 +93,9 @@ START → Query Understanding
 git clone <repository-url>
 cd CogniFlow
 
-python -m venv .venv
-source .venv/bin/activate   # Linux/Mac
-# .venv\Scripts\activate    # Windows
+python -m venv venv
+source venv/bin/activate   # Linux/Mac
+# venv\Scripts\activate    # Windows
 
 pip install -r requirements.txt
 ```
@@ -102,20 +104,25 @@ pip install -r requirements.txt
 
 ```bash
 cp .env.example .env
-# Edit .env with your API key (Groq is free and recommended)
+# Edit .env: set GOOGLE_API_KEY for Gemini (default), or switch LLM_PROVIDER and the matching key
 ```
 
-**Supported LLM providers:**
+**Supported LLM providers** (default: **Gemini**):
 | Provider | Model | Cost |
 |----------|-------|------|
+| Gemini | e.g. `gemini-2.5-flash` (`GEMINI_MODEL`; `GOOGLE_API_KEY`) | Per Google AI pricing |
+| OpenRouter | e.g. `google/gemma-2-9b-it` (set `OPENROUTER_MODEL`) | Per OpenRouter / model |
 | Groq | `llama-3.3-70b-versatile` | Free tier available |
 | OpenAI | `gpt-4o-mini` or `gpt-4o` | Paid |
+| Anthropic | Claude (see `ANTHROPIC_MODEL`) | Paid |
 | Ollama | Any local model | Free (local) |
+
+By default, set `GOOGLE_API_KEY` from [Google AI Studio](https://aistudio.google.com/app/apikey) and optionally `GEMINI_MODEL` (default `gemini-2.5-flash`). For **OpenRouter** (e.g. Gemma), use `LLM_PROVIDER=openrouter` and `OPENROUTER_API_KEY` from [openrouter.ai/keys](https://openrouter.ai/keys).
 
 ### 3. Ingest sample documents
 
 ```bash
-python ingest_docs.py
+python ingest_docs.py sample_docs
 ```
 
 ### 4. Start the API server
@@ -227,57 +234,65 @@ Liveness probe.
 
 ## Sample Conversation Flows
 
-### Flow 1: Multi-turn technical question
+### Flow 1 — Multi-turn technical Q&A
 
-```
+Three turns show how **query rewriting** resolves anaphora and how **comparison intent** widens retrieval.
+
+| Turn | User | What happens internally |
+|------|------|-------------------------|
+| 1 | “How do I set up authentication in FastAPI?” | Intent: factual. Retrieval: semantic/keyword on `sample_docs/fastapi_guide.md`. Response covers `OAuth2PasswordBearer`, token URL, and password flow patterns. |
+| 2 | “What about dependency injection for the database?” | Intent: **follow_up**. Rewriter expands “the database” using prior turn → *FastAPI database dependency injection* (session + `Depends`, lifespan for engine). Retrieval targets DI sections; answer ties back to auth (e.g. `get_current_user` + DB session). |
+| 3 | “Can you compare that with Django?” | Intent: **comparison**. Rewriter binds “that” to **FastAPI’s DI + auth style**. Retrieval router favors **hybrid** (RRF) to pull both FastAPI-oriented chunks and framework-contrast material (e.g. Django middleware / ORM patterns). Synthesis produces a side-by-side comparison, not a single-doc paraphrase. |
+
+```text
 User: How do I set up authentication in FastAPI?
-Bot:  [Retrieves FastAPI guide → explains OAuth2PasswordBearer, JWT tokens]
+Assistant: [OAuth2 routes, JWT outline, cites fastapi_guide.md]
 
 User: What about dependency injection for the database?
-Bot:  [Query understanding detects follow-up → rewriter adds "FastAPI" context
-       → retrieves DI section → synthesizes with auth context]
+Assistant: [Rewritten query includes FastAPI context → DI / SessionLocal / Depends]
 
-User: Can you compare that with Django's approach?
-Bot:  [Detects comparison intent → hybrid search for both → synthesized comparison]
+User: Can you compare that with Django?
+Assistant: [comparison intent → hybrid retrieval → FastAPI vs Django auth & DI contrast]
 ```
 
-### Flow 2: Cross-session memory
+### Flow 2 — Cross-session memory
 
-```
-Session 1:
-User: I'm building a REST API with FastAPI and PostgreSQL
-Bot:  [Stores memory: context="Building REST API with FastAPI + PostgreSQL"]
+| Phase | Session | User | System behavior |
+|-------|---------|------|-----------------|
+| A | Session 1 | “I’m building a REST API with FastAPI and PostgreSQL.” | Memory manager persists e.g. `(context)` *Uses FastAPI + PostgreSQL for a REST API*. |
+| B | Session 2 (new `session_id`, same `user_id`) | “What indexing strategy should I use?” | **User memory** is loaded into `user_memory_context` before retrieval. The assistant infers **PostgreSQL** from stored memory (not from this message alone), retrieves `postgresql_guide.md` (B-tree, GIN, partial, FTS), and answers in that stack context. |
 
-Session 2:
-User: What indexing strategy should I use?
-Bot:  [Loads user memory → knows they use PostgreSQL → retrieves PostgreSQL guide
-       → recommends B-tree and GIN indexes relevant to their stack]
-```
+Without cross-session memory, the question is ambiguous (Redis? MySQL?). With memory, the retriever stays anchored to **PostgreSQL**.
 
-### Flow 3: Conversation summarization
+### Flow 3 — Conversation summarization
 
-```
-[After 10+ messages in a session]
-Bot:  [Summarizer agent triggers → produces summary:
-       "User is building an e-commerce API. Discussed FastAPI routing,
-        PostgreSQL setup, and Docker deployment. Decided to use
-        connection pooling with PgBouncer."]
+When the session exceeds the configured message threshold (default: **10 messages**), the **conversation summarizer** runs after the response. It produces a **rolling summary** stored on the session (e.g. goals, decisions, open questions). Subsequent turns inject this summary so the model retains gist without sending the full transcript.
+
+```text
+[Messages 1–10+: routing, Docker, PostgreSQL indexes, env vars, …]
+
+Summarizer output (illustrative):
+"The user is building an e-commerce API with FastAPI and PostgreSQL.
+Discussed indexing (B-tree vs GIN), Docker Compose networking, and .env handling.
+Open: whether to add PgBouncer in staging."
+
+Next user message: shorter history window + summary → stays within token budget.
 ```
 
 ## Performance Benchmarks
 
-Measured on sample_docs (5 documents, ~200 chunks):
+Representative timings on a typical dev machine with `sample_docs` (5–7 documents) ingested:
 
 | Metric | Value |
 |--------|-------|
-| Document ingestion (5 docs) | ~8-12s |
-| First query (cold start) | ~3-5s |
+| Document ingestion (5-7 docs) | ~8-12s |
+| First query (cold start, embedding model load) | ~3-5s |
 | Subsequent queries | ~1.5-3s |
 | Memory overhead per session | ~2KB |
-| Vector search (top-5) | ~50ms |
-| Embedding generation | ~100ms per query |
+| Vector search latency (top-5) | ~50ms |
+| Embedding generation per query | ~100ms |
 
-*Latency depends on LLM provider. Groq is fastest (~0.5s), OpenAI ~1-2s.*
+Latency depends on LLM provider. Groq is fastest (~0.5s), OpenAI ~1-2s.
 
 ## Project Structure
 
@@ -317,12 +332,13 @@ CogniFlow/
 │   └── metrics.py               # Rolling latency / counters
 │
 ├── sample_docs/                 # Sample technical documents (ingest for RAG)
-│   ├── example_api.md
 │   ├── fastapi_guide.md
 │   ├── docker_guide.md
 │   ├── langchain_rag_guide.md
 │   ├── python_best_practices.md
-│   └── postgresql_guide.md
+│   ├── postgresql_guide.md
+│   ├── git_workflow.md
+│   └── api_security.md
 │
 └── tests/                       # Test suite
     ├── test_core.py             # Model + memory store + processor tests
@@ -334,7 +350,7 @@ CogniFlow/
 1. **ChromaDB over Pinecone/Weaviate**: Zero-config local setup, great for prototyping. Swap-ready via `VectorStore` abstraction.
 2. **SQLite over PostgreSQL**: Simpler deployment. The `MemoryStore` class is database-agnostic — swap the connector for production.
 3. **sentence-transformers for embeddings**: Runs locally, no API costs. The `all-MiniLM-L6-v2` model is fast and produces good 384-dim embeddings.
-4. **Groq as default LLM**: Free tier, extremely fast inference (~500ms). Easily switchable to OpenAI or Ollama.
+4. **Gemini as default LLM**: Native Google Generative AI (`gemini-2.5-flash` by default). Switch via `LLM_PROVIDER` to OpenRouter, Groq, OpenAI, Anthropic, or Ollama.
 5. **Hybrid search with RRF**: Reciprocal Rank Fusion combines semantic understanding with keyword precision.
 
 ## Running Tests
@@ -342,8 +358,8 @@ CogniFlow/
 Use a virtualenv with all dependencies from `requirements.txt` (including `python-multipart` for upload routes):
 
 ```bash
-python -m venv .venv
-source .venv/bin/activate   # Windows: .venv\Scripts\activate
+python -m venv venv
+source venv/bin/activate   # Windows: venv\Scripts\activate
 pip install -r requirements.txt
 pytest tests/ -v
 ```
@@ -352,7 +368,7 @@ Optional coverage:
 
 ```bash
 pip install pytest-cov
-pytest tests/ --cov=. --cov-report=term-missing --ignore=venv --ignore=.venv
+pytest tests/ --cov=. --cov-report=term-missing --ignore=venv --ignore=venv
 ```
 
 ## License

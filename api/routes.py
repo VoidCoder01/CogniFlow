@@ -4,6 +4,7 @@ import logging
 import os
 import tempfile
 import time
+from uuid import uuid4
 from pathlib import Path
 from typing import Annotated, Any, Iterator
 
@@ -32,6 +33,51 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/v1", tags=["cogniflow"])
 
 
+def _chat_error_detail(exc: BaseException) -> str:
+    """Surface safe, actionable hints; full traceback stays in logs."""
+    if settings.expose_internal_errors:
+        return (str(exc) or "Chat processing failed")[:2000]
+    if isinstance(exc, ModuleNotFoundError):
+        return (
+            f"{exc} Install dependencies: `pip install -r requirements.txt` "
+            "(provider packages must match LLM_PROVIDER)."
+        )[:1500]
+    if isinstance(exc, ImportError) and "ContextOverflowError" in str(exc):
+        return (
+            "LangChain package versions are incompatible (e.g. langchain-core too old for "
+            "langchain-anthropic). Fix: `pip install -r requirements.txt` or upgrade "
+            "`langchain-core` to >=1.3.0 to match langgraph."
+        )[:1500]
+    t = (str(exc) or "").strip()
+    low = t.lower()
+    if isinstance(exc, ValueError) and (
+        "api_key" in low or "required when llm" in low or "unsupported llm_provider" in low
+    ):
+        return t[:1500]
+    if any(
+        x in low
+        for x in (
+            "401",
+            "403",
+            "429",
+            "400",
+            "incorrect api key",
+            "invalid api key",
+            "authentication",
+            "rate limit",
+            "dimension",
+            "embedding",
+            "credit balance",
+            "too low to access",
+            "purchase credits",
+            "plans & billing",
+            "invalid_request_error",
+        )
+    ):
+        return t[:1500]
+    return "Chat processing failed"
+
+
 def _doc_distance_to_relevance(distance: float | None) -> float:
     if distance is None:
         return 0.0
@@ -52,6 +98,8 @@ def _sources_from_retrieved(docs: list[dict[str, Any]]) -> list[dict[str, Any]]:
                 "id": d.get("id"),
                 "title": meta.get("title"),
                 "source": meta.get("source"),
+                "original_filename": meta.get("original_filename"),
+                "doc_instance_id": meta.get("doc_instance_id"),
                 "relevance": _doc_distance_to_relevance(d.get("distance")),
             }
         )
@@ -190,7 +238,7 @@ def chat(
     except Exception as exc:
         request_metrics.record_error()
         logger.exception("chat failed: %s", exc)
-        raise HTTPException(status_code=500, detail="Chat processing failed") from exc
+        raise HTTPException(status_code=500, detail=_chat_error_detail(exc)) from exc
 
 
 @router.post("/chat/stream")
@@ -305,10 +353,16 @@ async def upload_document(
 
     fd, tmp_path = tempfile.mkstemp(suffix=suffix)
     os.close(fd)
+    doc_instance_id = str(uuid4())
+    orig_name = (file.filename or "upload").strip() or "upload"
     try:
         Path(tmp_path).write_bytes(data)
         processor = DocumentProcessor()
-        chunks = processor.process_file(tmp_path)
+        chunks = processor.process_file(
+            tmp_path,
+            original_filename=orig_name,
+            doc_instance_id=doc_instance_id,
+        )
         if not chunks:
             raise HTTPException(status_code=422, detail="No extractable text from document")
         store.add_documents(chunks)
@@ -337,7 +391,10 @@ def stats(
         "sessions_total": counts["sessions"],
         "messages_total": counts["messages"],
         "user_memory_rows": counts["user_memory_rows"],
+        "embedding_backend": settings.embedding_backend,
+        "embedding_device": settings.embedding_device,
         "embedding_model": settings.embedding_model,
+        "openai_embedding_model": settings.openai_embedding_model,
         "llm_provider": settings.llm_provider,
     }
 

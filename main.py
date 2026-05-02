@@ -31,8 +31,10 @@ async def lifespan(app: FastAPI):
         if path:
             os.makedirs(path, exist_ok=True)
     logger.info(
-        "CogniFlow API starting (llm_provider=%s, checkpoint=%s)",
+        "CogniFlow API starting (llm=%s, embeddings=%s/%s, checkpoint=%s)",
         settings.llm_provider,
+        settings.embedding_backend,
+        settings.embedding_device if settings.embedding_backend == "local" else "api",
         settings.checkpoint_backend,
     )
     yield

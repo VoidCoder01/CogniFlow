@@ -38,6 +38,27 @@ def get_chat_model() -> BaseChatModel:
             **kw,
         )
 
+    if provider == "openrouter":
+        from langchain_openai import ChatOpenAI
+
+        if not settings.openrouter_api_key:
+            raise ValueError(
+                "OPENROUTER_API_KEY is required when LLM_PROVIDER=openrouter "
+                "(create a key at https://openrouter.ai/keys)"
+            )
+        model = (settings.openrouter_model or "google/gemma-2-9b-it").strip()
+        base = settings.openrouter_base_url.rstrip("/")
+        return ChatOpenAI(
+            api_key=settings.openrouter_api_key,
+            model=model,
+            openai_api_base=base,
+            default_headers={
+                "HTTP-Referer": settings.openrouter_http_referer,
+                "X-Title": settings.openrouter_app_title,
+            },
+            **kw,
+        )
+
     if provider == "anthropic":
         from langchain_anthropic import ChatAnthropic
 
@@ -58,6 +79,21 @@ def get_chat_model() -> BaseChatModel:
         model = settings.llm_model or "llama-3.1-8b-instant"
         return ChatGroq(api_key=settings.groq_api_key, model=model, **kw)
 
+    if provider in ("gemini", "google"):
+        from langchain_google_genai import ChatGoogleGenerativeAI
+
+        if not settings.google_api_key:
+            raise ValueError(
+                "GOOGLE_API_KEY is required when LLM_PROVIDER=gemini "
+                "(create a key at https://aistudio.google.com/app/apikey)"
+            )
+        model = (settings.gemini_model or "gemini-2.5-flash").strip()
+        return ChatGoogleGenerativeAI(
+            google_api_key=settings.google_api_key,
+            model=model,
+            **kw,
+        )
+
     if provider == "ollama":
         from langchain_community.chat_models import ChatOllama
 
@@ -70,7 +106,7 @@ def get_chat_model() -> BaseChatModel:
 
     raise ValueError(
         f"Unsupported LLM_PROVIDER={settings.llm_provider!r}; "
-        "use openai, anthropic, groq, or ollama"
+        "use openai, anthropic, groq, ollama, openrouter, or gemini"
     )
 
 
