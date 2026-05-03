@@ -1,22 +1,88 @@
+# ── Python ────────────────────────────────────────────────────────────────────
 __pycache__/
-*.pyc
-*.pyo
 *.py[cod]
+*$py.class
+*.so
+*.egg
 *.egg-info/
 dist/
 build/
-.venv/
+.eggs/
+pip-wheel-metadata/
+*.pyo
+
+# ── Virtual environments ───────────────────────────────────────────────────────
 venv/
+.venv/
+env/
+.env.local
+# Keep .env.example (template), ignore the real secrets file
 .env
-data/
-*.db
-.DS_Store
-.idea/
-.vscode/
-*.log
-.cursor/
+
+# ── Testing & coverage ────────────────────────────────────────────────────────
 .pytest_cache/
-htmlcov/
 .coverage
+htmlcov/
+*.cover
+coverage.xml
+nosetests.xml
+test-results/
+
+# ── Data & databases ──────────────────────────────────────────────────────────
+# SQLite databases (sessions, memory, checkpoints, cache)
+data/*.db
+data/*.db-wal
+data/*.db-shm
+data/*.sqlite
+data/*.sqlite3
+
+# ChromaDB vector store (large binary index files)
+data/chroma/
+
+# Keep the data folder itself tracked
+!data/.gitkeep
+
+# ── Secrets & credentials ─────────────────────────────────────────────────────
+*.pem
+*.key
+*.cert
+secrets/
+.secrets
+
+# ── IDE & editor ──────────────────────────────────────────────────────────────
+.vscode/
+.cursor/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+
+# ── Logs ──────────────────────────────────────────────────────────────────────
+*.log
+logs/
+
+# ── Docker ────────────────────────────────────────────────────────────────────
+# Ignore locally built images (they're rebuilt from Dockerfile)
+# Keep docker-compose.yml and Dockerfile tracked
+
+# ── Distribution / packaging ──────────────────────────────────────────────────
+*.tar.gz
+*.zip
 cogniflow.zip
-cogniflow1.zip
+
+# ── Type checking ─────────────────────────────────────────────────────────────
+.mypy_cache/
+.dmypy.json
+.pyright/
+
+# ── Jupyter (if ever used) ────────────────────────────────────────────────────
+.ipynb_checkpoints/
+*.ipynb
+
+# ── OS ────────────────────────────────────────────────────────────────────────
+.DS_Store
+.AppleDouble
+.LSOverride
+desktop.ini

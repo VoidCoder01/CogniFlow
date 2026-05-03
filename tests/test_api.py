@@ -42,6 +42,8 @@ def client(tmp_path, monkeypatch, clear_singletons):
     monkeypatch.setenv("SQLITE_DB_PATH", str(tmp_path / "memory.db"))
     monkeypatch.setenv("CHROMA_PERSIST_DIR", str(tmp_path / "chroma"))
     monkeypatch.setenv("CHAT_RESPONSE_CACHE_BACKEND", "memory")
+    # Avoid EmbeddingManager in /chat (put_cached embeds by default); keeps tests fast/offline.
+    monkeypatch.setenv("CHAT_EXACT_MESSAGE_CACHE_ENABLED", "false")
 
     import importlib
     from importlib import reload

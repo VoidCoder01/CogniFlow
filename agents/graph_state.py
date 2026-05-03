@@ -18,12 +18,17 @@ class CogniFlowState(TypedDict, total=False):
     user_memory_context: str
     cross_session_context: str
     query_intent: str
+    needs_retrieval: bool
+    needs_memory: bool
+    response_style: str
     needs_history: bool
     needs_rewrite: bool
     rewritten_query: str
     retrieval_strategy: str
     sub_queries: list[str]
     retrieved_documents: list[dict[str, Any]]
+    use_retrieved_context: bool
+    context_validation_reason: str
     synthesized_context: str
     response: str
     should_summarize: bool
@@ -69,12 +74,17 @@ def agent_state_to_graph(s: AgentState) -> CogniFlowState:
         "user_memory_context": s.user_memory_context or "",
         "cross_session_context": s.cross_session_context or "",
         "query_intent": s.query_intent.value if s.query_intent else "",
+        "needs_retrieval": getattr(s, "needs_retrieval", True),
+        "needs_memory": getattr(s, "needs_memory", False),
+        "response_style": getattr(s, "response_style", "short") or "short",
         "needs_history": s.needs_history,
         "needs_rewrite": s.needs_rewrite,
         "rewritten_query": s.rewritten_query,
         "retrieval_strategy": s.retrieval_strategy.value,
         "sub_queries": [],
         "retrieved_documents": list(s.retrieved_documents),
+        "use_retrieved_context": getattr(s, "use_retrieved_context", True),
+        "context_validation_reason": getattr(s, "context_validation_reason", "") or "",
         "synthesized_context": s.synthesized_context,
         "response": s.response,
         "should_summarize": s.should_summarize,
@@ -111,11 +121,16 @@ def graph_to_agent_state(base: AgentState, g: dict[str, Any]) -> AgentState:
             "user_memory_context": str(g.get("user_memory_context") or ""),
             "cross_session_context": str(g.get("cross_session_context") or ""),
             "query_intent": intent,
+            "needs_retrieval": bool(g.get("needs_retrieval", True)),
+            "needs_memory": bool(g.get("needs_memory", False)),
+            "response_style": str(g.get("response_style") or "short"),
             "needs_history": bool(g.get("needs_history", False)),
             "needs_rewrite": bool(g.get("needs_rewrite", False)),
             "rewritten_query": str(g.get("rewritten_query") or ""),
             "retrieval_strategy": strat,
             "retrieved_documents": list(g.get("retrieved_documents") or []),
+            "use_retrieved_context": bool(g.get("use_retrieved_context", True)),
+            "context_validation_reason": str(g.get("context_validation_reason") or ""),
             "synthesized_context": str(g.get("synthesized_context") or ""),
             "response": str(g.get("response") or ""),
             "should_summarize": bool(g.get("should_summarize", False)),
@@ -127,6 +142,6 @@ def graph_to_agent_state(base: AgentState, g: dict[str, Any]) -> AgentState:
 
 
 RouteAfterUnderstanding = Literal[
-    "rewrite", "retrieve", "direct_synthesize", "decompose"
+    "rewrite", "retrieve", "direct_synthesize", "decompose", "session_recall"
 ]
 RouteAfterRewriting = Literal["decompose", "retrieve"]

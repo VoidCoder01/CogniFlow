@@ -10,12 +10,12 @@ from uuid import uuid4
 from pathlib import Path
 from typing import Annotated, Any, Iterator
 
-from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, Request, UploadFile
 from fastapi.responses import StreamingResponse
 
 from agents.graph_state import graph_to_agent_state
 from agents.orchestrator import CogniFlowOrchestrator, merge_graph_patch
-from api.deps import get_memory_store, get_orchestrator, get_vector_store
+from api.deps import get_memory_store, get_orchestrator, get_vector_store, peek_vector_store
 from api.metrics import request_metrics
 from config import settings
 from core.document_processor import DocumentProcessor
@@ -442,6 +442,7 @@ def chat_stream(
                         sources=list(cached.get("sources") or []),
                         agent_log=log,
                         latency_seconds=round(latency, 4),
+                        postprocess_latency_seconds=None,
                         conversation_summary=cached.get("conversation_summary") or "",
                     )
                     reply_text = payload_out.response or ""
@@ -492,14 +493,22 @@ def chat_stream(
                             "agent_log": evt.get("agent_log") or [],
                         },
                     )
+            t_after_synthesis = time.perf_counter()
+            response_latency = t_after_synthesis - t0
             orchestrator.finalize_after_synthesis(graph_state)
             out = graph_to_agent_state(agent, graph_state)
-            latency = time.perf_counter() - t0
+            postprocess_latency = time.perf_counter() - t_after_synthesis
+            total_wall = response_latency + postprocess_latency
 
             user_msg = ChatMessage(role=MessageRole.user, content=msg)
             log = list(out.agent_log or [])
             log.append(
-                {"node": "orchestrator", "total_latency_seconds": round(latency, 4)}
+                {
+                    "node": "orchestrator",
+                    "response_latency_seconds": round(response_latency, 4),
+                    "postprocess_latency_seconds": round(postprocess_latency, 4),
+                    "total_latency_seconds": round(total_wall, 4),
+                }
             )
             _append_pipeline_timing(log)
             asst_msg = ChatMessage(
@@ -540,13 +549,14 @@ def chat_stream(
                 conversation_summary=out.conversation_summary or "",
                 context_fp=ctx_fp,
             )
-            request_metrics.record_chat_latency(latency)
+            request_metrics.record_chat_latency(response_latency)
             payload_out = ChatResponse(
                 session_id=body.session_id,
                 response=out.response,
                 sources=sources,
                 agent_log=log,
-                latency_seconds=round(latency, 4),
+                latency_seconds=round(response_latency, 4),
+                postprocess_latency_seconds=round(postprocess_latency, 4),
                 conversation_summary=out.conversation_summary or "",
             )
             reply_text = payload_out.response or ""
@@ -643,7 +653,7 @@ def upload_document(
 
 @router.get("/stats")
 def stats(
-    vstore: Annotated[object, Depends(get_vector_store)],
+    request: Request,
     store: Annotated[MemoryStore, Depends(get_memory_store)],
     session_id: str | None = Query(
         default=None,
@@ -655,7 +665,22 @@ def stats(
     ),
 ):
     """Return vector-store and SQLite table counts plus configured model names."""
-    vs = vstore.get_collection_stats(session_id=session_id, user_id=user_id)
+    ov = request.app.dependency_overrides.get(get_vector_store)
+    if ov is not None:
+        vstore = ov()
+        vs_err = None
+    else:
+        vstore, vs_err = peek_vector_store()
+    if vstore is not None:
+        vs = vstore.get_collection_stats(session_id=session_id, user_id=user_id)
+        vs.setdefault("status", "ok")
+    else:
+        vs = {
+            "name": settings.chroma_collection_name,
+            "count": 0,
+            "status": "unavailable",
+            "detail": vs_err or "Vector store unavailable",
+        }
     counts = store.table_counts()
     return {
         "vector_store": vs,

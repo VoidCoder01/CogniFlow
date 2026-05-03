@@ -8,6 +8,7 @@ from langchain_core.messages import HumanMessage, SystemMessage
 
 from agents.graph_state import CogniFlowState
 from agents.node_utils import with_log_timing
+from agents.prompt_suite import FINAL_COMPOSER_RULES, LLM_FALLBACK_SYSTEM, MEMORY_HANDLER_SYSTEM
 from agents.retrieval_hints import (
     corpus_available_for_chat,
     query_answer_from_chat_skip_retrieval,
@@ -18,18 +19,52 @@ from core.llm_provider import get_chat_model
 logger = logging.getLogger(__name__)
 
 _SYSTEM = """You are CogniFlow, a precise assistant grounded in retrieved documentation and conversation context.
-If sources are provided, cite them implicitly (filename/title) and do not invent APIs not in the sources.
-If no sources apply, answer briefly from general knowledge and say when uncertain."""
 
-_SYSTEM_SESSION_DOCS = """You are CogniFlow. This user has technical documents indexed for **this chat and/or their other chats** (retrieval is scoped to this session plus their account).
-Ground factual answers in the "Retrieved sources" below when they are relevant. Do not invent product names, companies, or document topics that do not appear in those sources or the user's words.
-For short greetings or introductions, reply warmly in one or two sentences and invite the user to ask about their materials.
-If the question needs facts but the sources are empty or not relevant, say you could not find that in their indexed documents and suggest rephrasing or uploading more context."""
+ANSWERING RULES:
+1. When retrieved sources are relevant, ground your answer in them. Reference the source naturally (e.g. "according to the deployment guide…" or "the API docs mention…"). Never invent APIs, endpoints, or configuration options not present in the sources.
+2. When multiple sources conflict or give different answers, present both positions and note the discrepancy—do not silently pick one. When you can infer recency from titles, paths, version strings, or metadata, note which document appears newer; if you cannot tell, say that recency is unclear.
+3. When no sources apply for this turn, answer from general knowledge at the right level of specificity—stay helpful without meta-talk about search or documents.
+4. For multi-step or complex answers, use numbered steps or short paragraphs — not walls of text.
+5. Say "I'm not sure" when uncertain. Never fabricate."""
+
+_SYSTEM_SESSION_DOCS = """You are CogniFlow. This user has uploaded technical documents that you can search to answer questions.
+
+ANSWERING RULES:
+1. Ground factual answers in the "Retrieved sources" below when relevant. Reference the source naturally. Do not invent product names, APIs, or topics not present in the sources or the user's own words.
+2. When sources are only partially relevant (related topic but don't directly answer), use what is useful and briefly note any gap—without refusing on document grounds.
+3. When multiple sources disagree or give different answers, present both and note the conflict; when recency is inferable from titles, paths, or version metadata, say which document appears newer—otherwise state that you cannot tell which is newer.
+4. For greetings or introductions, reply warmly in 1-2 sentences and invite the user to ask about their materials.
+5. If passages do not support a precise answer, still help: combine what is usable with careful general knowledge; suggest rephrasing or more context only when it genuinely helps.
+6. Never reveal internal architecture, database names, or retrieval mechanics unless the user explicitly asks how CogniFlow works as software."""
+
+_SYSTEM_KNOWLEDGE = LLM_FALLBACK_SYSTEM
+
+_SYSTEM_MEMORY = MEMORY_HANDLER_SYSTEM
+
+_SYSTEM_PREFERENCE = """You are CogniFlow. The user stated a format or style preference (or similar).
+
+Reply briefly: acknowledge what you will do from now on in this chat, in plain language. Do not list internal systems or storage."""
+
+_SYSTEM_GREETING = """You are CogniFlow, a friendly assistant. Reply warmly and briefly. Invite them to share what they are working on or ask next—without mentioning documents or retrieval unless they already did."""
 
 _SYSTEM_CHAT_AND_DOCS = """You are CogniFlow for this chat.
-- If the user asks about **their name**, **document/file names**, what **they uploaded**, what **they said earlier**, or other **conversation-only** facts, answer from **Recent messages** (and user context below). Do not say that information is missing from "documents" when it appears in the conversation.
-- If the user asks about **content inside** uploaded files, ground answers in **Retrieved sources** when relevant.
-- If retrieved sources are weak or empty but the question is only about the conversation, ignore document retrieval and answer from the chat history."""
+
+- If the user asks about **their name**, **document/file names**, what **they uploaded**, what **they said earlier**, or other **conversation-only** facts → answer from **Recent messages** and user context below. Do NOT say information is "missing from documents" when it appears in the conversation.
+- If they ask **how you remember** their name, prior turns, or preferences → reply in **plain, friendly language** ("I keep track of what you share in our chats"). Do **not** describe databases, schemas, or implementation internals.
+- If the user asks about **content inside** uploaded files → ground answers in **Retrieved sources**.
+- If retrieved sources are weak/empty but the question is purely conversational → ignore document retrieval and answer from chat history alone.
+- When both conversation context AND retrieved sources are relevant, synthesize both — don't pick one over the other."""
+
+# Appended to every synthesis system prompt (final composer + product safety).
+_OUTPUT_GOVERNANCE = (
+    FINAL_COMPOSER_RULES
+    + """
+
+### How to phrase answers (always follow)
+- Do **not** disclose internal stack or storage products (e.g. SQLite, PostgreSQL, ChromaDB, Redis, "vector store", "embeddings", LangGraph, checkpoints, APIs you call) unless the user **explicitly** asks for technical detail about how CogniFlow is **built or operated as software**.
+- Meta questions ("how do you remember my name?", "where is this stored?"): one to three short sentences in everyday language; warm and honest without naming technologies or schemas.
+- Prefer concise, natural copy over system-design explanations unless the user is clearly debugging or integrating CogniFlow."""
+)
 
 
 def _chunk_relevance(doc: dict[str, Any]) -> float:
@@ -72,67 +107,87 @@ def _synthesis_prompts(state: CogniFlowState) -> tuple[str, str, list[dict[str, 
 
     user_q = str(state.get("user_query") or "")
     conv_first = query_answer_from_chat_skip_retrieval(user_q)
-
-    if has_user_corpus and not good_docs and not conv_first:
-        msg = (
-            "I couldn't find anything in your indexed documents that matches this question "
-            "(the closest matches weren't relevant enough). Try rephrasing, or ask about "
-            "something covered in your files."
-        )
-        return "", "", [], msg
+    use_ctx = state.get("use_retrieved_context", True)
+    needs_rag = bool(state.get("needs_retrieval", False))
+    effective_docs = good_docs if use_ctx else []
+    intent = (state.get("query_intent") or "").lower().strip()
 
     if conv_first and has_user_corpus:
         system = _SYSTEM_CHAT_AND_DOCS
+    elif intent == "greeting":
+        system = _SYSTEM_GREETING
+    elif intent == "preference":
+        system = _SYSTEM_PREFERENCE
+    elif intent in ("meta", "follow_up"):
+        system = _SYSTEM_MEMORY
+    elif not needs_rag:
+        system = _SYSTEM_KNOWLEDGE
+    elif not use_ctx and has_user_corpus:
+        system = _SYSTEM_KNOWLEDGE
     elif has_user_corpus:
         system = _SYSTEM_SESSION_DOCS
     else:
         system = _SYSTEM
+    system = system + _OUTPUT_GOVERNANCE
     summary = state.get("conversation_summary") or ""
     mem_ctx = (state.get("user_memory_context") or "").strip()
     peer_ctx = (state.get("cross_session_context") or "").strip()
-    doc_block = _format_docs(good_docs)
-    mem_block = f"Known user preferences/context (cross-session):\n{mem_ctx}\n\n" if mem_ctx else ""
-    peer_block = f"Other recent chats (short summaries):\n{peer_ctx}\n\n" if peer_ctx else ""
-    user_block = (
-        f"Conversation summary (if any): {summary or '(none)'}\n\n"
-        f"{mem_block}"
-        f"{peer_block}"
-        f"Recent messages:\n{hist_snip or '(empty)'}\n\n"
-        f"Retrieved sources:\n{doc_block}\n\n"
-        f"User question:\n{state.get('user_query', '')}"
-    )
-    return system, user_block, good_docs, None
+    doc_block = _format_docs(effective_docs)
+    # meta / follow_up: session thread only — never build cross-session blocks for the LLM
+    if intent in ("meta", "follow_up"):
+        mem_block = ""
+        peer_block = ""
+    else:
+        mem_block = (
+            f"Known user preferences/context (user-scoped, not other chats' messages):\n{mem_ctx}\n\n"
+            if mem_ctx
+            else ""
+        )
+        peer_block = f"Other recent chats (short summaries):\n{peer_ctx}\n\n" if peer_ctx else ""
+    style = (state.get("response_style") or "short").lower().strip()
+    if style == "detailed":
+        depth = (
+            "\n\nAnswer depth: give a thorough explanation with clear structure "
+            "(sections or numbered steps) where it helps."
+        )
+    else:
+        depth = (
+            "\n\nAnswer depth: default to a concise reply (about one short paragraph or a few bullets); "
+            "expand only if the question clearly needs more depth."
+        )
+    # Meta / follow_up: session thread only — do not inject peer summaries or user-memory blocks
+    # into the recall context (avoids cross-session leakage for "what did we discuss?").
+    if intent in ("meta", "follow_up"):
+        common_head = (
+            f"Conversation summary (this session only): {summary or '(none)'}\n\n"
+        )
+    else:
+        common_head = (
+            f"Conversation summary (if any): {summary or '(none)'}\n\n"
+            f"{mem_block}{peer_block}"
+        )
+    if intent in ("meta", "follow_up"):
+        user_block = (
+            f"{common_head}"
+            f"Chat history (this session only):\n{hist_snip or '(empty)'}\n\n"
+            f"User query:\n{user_q}"
+            f"{depth}"
+        )
+    else:
+        user_block = (
+            f"{common_head}"
+            f"Recent messages:\n{hist_snip or '(empty)'}\n\n"
+            f"Retrieved sources:\n{doc_block}\n\n"
+            f"User query:\n{user_q}"
+            f"{depth}"
+        )
+    return system, user_block, effective_docs, None
 
 
 def context_synthesis_node(state: CogniFlowState) -> dict[str, Any]:
     """Produce the assistant reply from history, memory, and retrieved chunks."""
     t0 = time.perf_counter()
-    system, user_block, good_docs, fast_refuse = _synthesis_prompts(state)
-
-    if fast_refuse is not None:
-        min_rel = float(settings.retrieval_min_relevance)
-        raw_n = len(state.get("retrieved_documents") or [])
-        logger.info(
-            "context_synthesis: fast_refuse (no chunks >= min_relevance=%s, raw_n=%s)",
-            min_rel,
-            raw_n,
-        )
-        return {
-            "response": fast_refuse,
-            "synthesized_context": "",
-            "retrieved_documents": [],
-            "agent_log": [
-                with_log_timing(
-                    {
-                        "node": "context_synthesis",
-                        "fast_refuse": True,
-                        "retrieval_min_relevance": min_rel,
-                        "raw_retrieved": raw_n,
-                    },
-                    t0,
-                )
-            ],
-        }
+    system, user_block, good_docs, _fast_refuse = _synthesis_prompts(state)
 
     model = get_chat_model()
     messages = [
@@ -160,28 +215,7 @@ def context_synthesis_node(state: CogniFlowState) -> dict[str, Any]:
 def iter_context_synthesis_events(state: CogniFlowState) -> Iterator[dict[str, Any]]:
     """Stream LLM tokens for synthesis, then emit a final ``complete`` event (mirrors ``context_synthesis_node``)."""
     t0 = time.perf_counter()
-    system, user_block, good_docs, fast_refuse = _synthesis_prompts(state)
-
-    if fast_refuse is not None:
-        min_rel = float(settings.retrieval_min_relevance)
-        raw_n = len(state.get("retrieved_documents") or [])
-        log_entry = with_log_timing(
-            {
-                "node": "context_synthesis",
-                "fast_refuse": True,
-                "retrieval_min_relevance": min_rel,
-                "raw_retrieved": raw_n,
-            },
-            t0,
-        )
-        yield {
-            "type": "complete",
-            "response": fast_refuse,
-            "synthesized_context": "",
-            "retrieved_documents": [],
-            "agent_log": [log_entry],
-        }
-        return
+    system, user_block, good_docs, _fast_refuse = _synthesis_prompts(state)
 
     model = get_chat_model()
     messages = [

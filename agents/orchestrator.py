@@ -24,12 +24,9 @@ from agents.memory_manager import memory_manager_node
 from agents.query_decomposer import query_decomposer_node
 from agents.query_rewriting import query_rewriting_node
 from agents.query_understanding import query_understanding_node
-from agents.retrieval_hints import (
-    corpus_available_for_chat,
-    query_answer_from_chat_skip_retrieval,
-    query_suggests_document_lookup,
-)
+from agents.context_validation import context_validation_node
 from agents.retrieval_router import retrieval_router_node
+from agents.session_recall import iter_session_recall_events, session_recall_node
 from config import settings
 from core.models import AgentState
 
@@ -73,26 +70,36 @@ def build_checkpointer() -> BaseCheckpointSaver:
 
 
 def route_after_understanding(state: CogniFlowState) -> RouteAfterUnderstanding:
-    """Branch after intent classification: synthesize directly, rewrite, retrieve, or decompose."""
-    user_q = str(state.get("user_query") or "")
-    if query_answer_from_chat_skip_retrieval(user_q):
-        return "direct_synthesize"
+    """Branch after the master router (query_understanding).
+
+    Intent-first routing (see ``agents.prompt_suite`` for prompt bodies):
+
+    - ``factual_doc`` → ``retrieve`` (then ``context_validation`` → grounded vs knowledge
+      in synthesis per ``use_retrieved_context``).
+    - ``multi_part`` → ``decompose`` then retrieval as in the graph.
+    - ``general_knowledge`` → ``direct_synthesize`` (no retrieval).
+    - ``follow_up`` / ``meta`` → ``direct_synthesize`` (memory / history prompts).
+    - ``session_recall`` → ``session_recall`` node (deterministic recap; no retrieval, no LLM).
+    - ``preference`` → ``direct_synthesize`` (acknowledgement); durable prefs via
+      ``memory_manager`` after the reply.
+
+    Optional ``rewrite`` is inserted for contextualized factual search when chat
+    disambiguation is needed (see ``query_understanding``).
+    """
     intent = (state.get("query_intent") or "").lower().strip()
-    sid = (state.get("session_id") or "").strip()
-    uid = (state.get("user_id") or "").strip()
-    if intent in ("greeting", "off_topic"):
-        if sid and corpus_available_for_chat(sid, uid):
-            if state.get("needs_rewrite"):
-                return "rewrite"
-            if intent == "multi_part":
-                return "decompose"
-            return "retrieve"
-        if not query_suggests_document_lookup(user_q):
-            return "direct_synthesize"
-    if state.get("needs_rewrite"):
-        return "rewrite"
+    if intent == "greeting":
+        return "direct_synthesize"
+    if intent == "session_recall":
+        return "session_recall"
+    # Never vector-search chat-about-self, even if needs_retrieval was mis-set
+    if intent in ("meta", "follow_up", "preference", "general_knowledge"):
+        return "direct_synthesize"
+    if not state.get("needs_retrieval", True):
+        return "direct_synthesize"
     if intent == "multi_part":
         return "decompose"
+    if state.get("needs_rewrite"):
+        return "rewrite"
     return "retrieve"
 
 
@@ -114,7 +121,9 @@ def build_graph(
     g.add_node("query_rewriting", query_rewriting_node)
     g.add_node("query_decomposer", query_decomposer_node)
     g.add_node("retrieval_router", retrieval_router_node)
+    g.add_node("context_validation", context_validation_node)
     g.add_node("context_synthesis", context_synthesis_node)
+    g.add_node("session_recall", session_recall_node)
     g.add_node("conversation_summarizer", conversation_summarizer_node)
     g.add_node("memory_manager", memory_manager_node)
 
@@ -124,11 +133,13 @@ def build_graph(
         route_after_understanding,
         {
             "direct_synthesize": "context_synthesis",
+            "session_recall": "session_recall",
             "rewrite": "query_rewriting",
             "retrieve": "retrieval_router",
             "decompose": "query_decomposer",
         },
     )
+    g.add_edge("session_recall", "conversation_summarizer")
     g.add_conditional_edges(
         "query_rewriting",
         route_after_rewriting,
@@ -138,7 +149,8 @@ def build_graph(
         },
     )
     g.add_edge("query_decomposer", "retrieval_router")
-    g.add_edge("retrieval_router", "context_synthesis")
+    g.add_edge("retrieval_router", "context_validation")
+    g.add_edge("context_validation", "context_synthesis")
     g.add_edge("context_synthesis", "conversation_summarizer")
     g.add_edge("conversation_summarizer", "memory_manager")
     g.add_edge("memory_manager", END)
@@ -161,6 +173,8 @@ class CogniFlowOrchestrator:
         payload.setdefault("memory_updates", [])
         payload.setdefault("agent_log", [])
         payload.setdefault("sub_queries", [])
+        payload.setdefault("use_retrieved_context", True)
+        payload.setdefault("context_validation_reason", "")
         return payload
 
     # NOTE: The streaming helpers below (run_until_before_synthesis,
@@ -176,22 +190,31 @@ class CogniFlowOrchestrator:
         branch = route_after_understanding(graph_state)
         if branch == "direct_synthesize":
             return
+        if branch == "session_recall":
+            merge_graph_patch(graph_state, session_recall_node(graph_state))
+            return
         if branch == "rewrite":
             merge_graph_patch(graph_state, query_rewriting_node(graph_state))
             br2 = route_after_rewriting(graph_state)
             if br2 == "decompose":
                 merge_graph_patch(graph_state, query_decomposer_node(graph_state))
             merge_graph_patch(graph_state, retrieval_router_node(graph_state))
+            merge_graph_patch(graph_state, context_validation_node(graph_state))
             return
         if branch == "decompose":
             merge_graph_patch(graph_state, query_decomposer_node(graph_state))
             merge_graph_patch(graph_state, retrieval_router_node(graph_state))
+            merge_graph_patch(graph_state, context_validation_node(graph_state))
             return
         merge_graph_patch(graph_state, retrieval_router_node(graph_state))
+        merge_graph_patch(graph_state, context_validation_node(graph_state))
 
     def apply_context_synthesis(self, graph_state: dict[str, Any]) -> None:
         """Non-streaming synthesis node (same semantics as compiled graph)."""
-        merge_graph_patch(graph_state, context_synthesis_node(graph_state))
+        if (graph_state.get("query_intent") or "").lower().strip() == "session_recall":
+            merge_graph_patch(graph_state, session_recall_node(graph_state))
+        else:
+            merge_graph_patch(graph_state, context_synthesis_node(graph_state))
 
     def finalize_after_synthesis(self, graph_state: dict[str, Any]) -> None:
         """Run summarizer + memory manager after the assistant reply exists."""
@@ -200,6 +223,9 @@ class CogniFlowOrchestrator:
 
     def iter_streaming_synthesis(self, graph_state: dict[str, Any]) -> Iterator[dict[str, Any]]:
         """Yield token and complete events from streaming LLM synthesis."""
+        if (graph_state.get("query_intent") or "").lower().strip() == "session_recall":
+            yield from iter_session_recall_events(graph_state)
+            return
         yield from iter_context_synthesis_events(graph_state)
 
     def invoke(
@@ -213,6 +239,8 @@ class CogniFlowOrchestrator:
         payload.setdefault("memory_updates", [])
         payload.setdefault("agent_log", [])
         payload.setdefault("sub_queries", [])
+        payload.setdefault("use_retrieved_context", True)
+        payload.setdefault("context_validation_reason", "")
         config: dict[str, Any] = {
             "configurable": {"thread_id": state.session_id},
         }

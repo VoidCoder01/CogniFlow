@@ -20,9 +20,12 @@ def _summary_system_prompt(message_count: int, avg_msg_len: int) -> str:
     target_chars = int(max(120, message_count * max(avg_msg_len, 20) * ratio))
     target_sentences = max(2, min(12, target_chars // 80))
     return (
-        f"Summarize the conversation in approximately {target_sentences} sentences "
-        f"(~{target_chars} characters). Focus on user goals, decisions, and unresolved issues. "
-        "Output plain text only."
+        f"Summarize this conversation in approximately {target_sentences} sentences "
+        f"(~{target_chars} characters).\n\n"
+        "PRESERVE: user goals, decisions made, unresolved issues, specific technical details "
+        "(version numbers, error codes, config values, file names).\n"
+        "DROP: greetings, filler, repeated questions, assistant explanations that were superseded by later corrections.\n"
+        "Output plain text only — no bullet points, no headers, no markdown."
     )
 
 
@@ -32,6 +35,21 @@ def conversation_summarizer_node(state: CogniFlowState) -> dict[str, Any]:
     history = state.get("conversation_history") or []
     prev = state.get("conversation_summary") or ""
     min_msgs = max(2, settings.summary_threshold)
+    intent = (state.get("query_intent") or "").lower().strip()
+    if intent == "greeting" and len(history) <= 12:
+        return {
+            "agent_log": [
+                with_log_timing(
+                    {
+                        "node": "conversation_summarizer",
+                        "skipped": True,
+                        "reason": "greeting_turn",
+                        "message_count": len(history),
+                    },
+                    t0,
+                )
+            ],
+        }
     if len(history) < min_msgs and not state.get("should_summarize"):
         return {
             "agent_log": [

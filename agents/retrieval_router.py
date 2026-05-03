@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import logging
 import time
-from functools import lru_cache
 from typing import Any
+
+_RETRIEVAL_VS_FAIL_MONO: float = 0.0
+_RETRIEVAL_VS_RETRY_SEC = 10.0
 
 from langchain_core.messages import HumanMessage, SystemMessage
 
@@ -26,17 +28,53 @@ Use keyword for exact identifiers, error codes, function names. Use hybrid when 
 
 _MAX_MERGED_DOCS = 8
 
+_retrieval_vs: VectorStore | None = None
+_retrieval_vs_failed = False
 
-@lru_cache(maxsize=1)
-def _get_vector_store() -> VectorStore:
-    """Reuse one ``VectorStore`` per process (Chroma client + collection)."""
-    return VectorStore()
+
+def reset_retrieval_vector_store() -> None:
+    """Clear cached VectorStore for tests or after fixing Chroma on disk."""
+    global _retrieval_vs, _retrieval_vs_failed, _RETRIEVAL_VS_FAIL_MONO
+    _retrieval_vs = None
+    _retrieval_vs_failed = False
+    _RETRIEVAL_VS_FAIL_MONO = 0.0
+
+
+def _get_vector_store() -> VectorStore | None:
+    """Reuse one ``VectorStore`` per process; return ``None`` if Chroma catalog cannot load."""
+    global _retrieval_vs, _retrieval_vs_failed, _RETRIEVAL_VS_FAIL_MONO
+    if _retrieval_vs is not None:
+        return _retrieval_vs
+    now = time.monotonic()
+    if _retrieval_vs_failed and now - _RETRIEVAL_VS_FAIL_MONO < _RETRIEVAL_VS_RETRY_SEC:
+        return None
+    if _retrieval_vs_failed:
+        logger.info("Retrying retrieval VectorStore after cooldown (Chroma may have been reset)")
+        _retrieval_vs_failed = False
+    try:
+        _retrieval_vs = VectorStore()
+        return _retrieval_vs
+    except Exception as exc:
+        logger.warning(
+            "VectorStore unavailable for retrieval (answers may lack doc grounding): %s",
+            exc,
+        )
+        _retrieval_vs_failed = True
+        _RETRIEVAL_VS_FAIL_MONO = time.monotonic()
+        return None
 
 
 def _heuristic_strategy(intent: str, query: str) -> str:
     """Pick retrieval strategy without LLM routing."""
     q = (query or "").lower()
-    if intent in ("greeting", "off_topic"):
+    if intent in (
+        "greeting",
+        "off_topic",
+        "general_knowledge",
+        "meta",
+        "preference",
+        "session_recall",
+    ):
         return "none"
     if "_" in query or "-" in query or any(x in q for x in ("err_", "error", "0x", "econn")):
         return "hybrid"
@@ -82,6 +120,7 @@ def retrieval_router_node(state: CogniFlowState) -> dict[str, Any]:
             rationale = f"{rationale} | session_doc_lookup".strip()
         elif intent in (
             "factual",
+            "factual_doc",
             "follow_up",
             "clarification",
             "comparison",
@@ -94,44 +133,47 @@ def retrieval_router_node(state: CogniFlowState) -> dict[str, Any]:
     queries_to_run: list[str] = []
 
     if strategy != "none":
-        try:
-            vs = _get_vector_store()
-            filt = VectorStore.scope_filter(sid, uid)
-            raw_sub = state.get("sub_queries") or []
-            stripped_sub = [str(s).strip() for s in raw_sub if str(s).strip()]
-            # Multiple sub-queries from decomposer → retrieve each; otherwise use single base query.
-            queries_to_run = stripped_sub if len(stripped_sub) > 1 else [base_q.strip() or base_q]
-            queries_to_run = [q for q in queries_to_run if q and str(q).strip()]
+        raw_sub = state.get("sub_queries") or []
+        stripped_sub = [str(s).strip() for s in raw_sub if str(s).strip()]
+        queries_to_run = stripped_sub if len(stripped_sub) > 1 else [base_q.strip() or base_q]
+        queries_to_run = [q for q in queries_to_run if q and str(q).strip()]
 
-            seen_ids: set[str] = set()
-            for q in queries_to_run:
-                qt = str(q).strip()
-                if not qt:
-                    continue
-                if strategy == "semantic":
-                    hits = vs.semantic_search(qt, top_k=5, filter_metadata=filt)
-                elif strategy == "keyword":
-                    hits = vs.keyword_search(qt, top_k=5, filter_metadata=filt)
-                else:
-                    hits = vs.hybrid_search(qt, top_k=5, filter_metadata=filt)
-                for doc in hits:
-                    if not isinstance(doc, dict):
+        vs = _get_vector_store()
+        if vs is None:
+            retrieved = []
+        else:
+            try:
+                filt = VectorStore.scope_filter(sid, uid)
+                seen_ids: set[str] = set()
+                for q in queries_to_run:
+                    qt = str(q).strip()
+                    if not qt:
                         continue
-                    doc_id = str(doc.get("id", "") or "")
-                    if doc_id and doc_id not in seen_ids:
-                        seen_ids.add(doc_id)
-                        retrieved.append(doc)
+                    if strategy == "semantic":
+                        hits = vs.semantic_search(qt, top_k=5, filter_metadata=filt)
+                    elif strategy == "keyword":
+                        hits = vs.keyword_search(qt, top_k=5, filter_metadata=filt)
+                    else:
+                        hits = vs.hybrid_search(qt, top_k=5, filter_metadata=filt)
+                    for doc in hits:
+                        if not isinstance(doc, dict):
+                            continue
+                        doc_id = str(doc.get("id", "") or "")
+                        if doc_id and doc_id not in seen_ids:
+                            seen_ids.add(doc_id)
+                            retrieved.append(doc)
 
-            def _dist_key(d: dict[str, Any]) -> float:
-                try:
-                    return float(d.get("distance") or 999)
-                except (TypeError, ValueError):
-                    return 999.0
+                def _dist_key(d: dict[str, Any]) -> float:
+                    try:
+                        return float(d.get("distance") or 999)
+                    except (TypeError, ValueError):
+                        return 999.0
 
-            retrieved.sort(key=_dist_key)
-            retrieved = retrieved[:_MAX_MERGED_DOCS]
-        except Exception as exc:
-            logger.warning("Vector retrieval failed: %s", exc)
+                retrieved.sort(key=_dist_key)
+                retrieved = retrieved[:_MAX_MERGED_DOCS]
+            except Exception as exc:
+                logger.warning("Vector retrieval failed: %s", exc)
+                retrieved = []
 
     log_entry = with_log_timing(
         {

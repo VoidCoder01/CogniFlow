@@ -159,6 +159,8 @@ uvicorn main:app --host 0.0.0.0 --port 8000 --reload
 streamlit run streamlit_app.py
 ```
 
+Messages up to **`STREAMLIT_SHORT_MESSAGE_SYNC_CHARS`** characters (default **120**) call **`POST /api/v1/chat`** instead of **`/chat/stream`**, so short prompts skip SSE and per-token typing delays. Set **`STREAMLIT_SHORT_MESSAGE_SYNC_CHARS=0`** to always use streaming, or raise the limit to use **`/chat`** for longer prompts.
+
 ### Docker (alternative)
 
 ```bash
@@ -217,6 +219,7 @@ Response:
     {"title": "fastapi_guide.md", "source": "...", "relevance": 0.87}
   ],
   "latency_seconds": 2.3,
+  "postprocess_latency_seconds": null,
   "conversation_summary": "",
   "agent_log": [
     {"node": "query_understanding", "intent": "factual", "elapsed_seconds": 0.42},
@@ -227,7 +230,7 @@ Response:
 }
 ```
 
-Each graph node appends **`elapsed_seconds`** (per-node CPU time). The final **`pipeline`** row sums those node times; **`orchestrator.total_latency_seconds`** is end-to-end wall time (LLM + retrieval + SQLite).
+Each graph node appends **`elapsed_seconds`** (per-node CPU time). The final **`pipeline`** row sums those node times. On **`POST /chat`**, **`latency_seconds`** matches a full **`graph.invoke`** (reply plus summarizer and memory manager inside the graph). On **`POST /chat/stream`**, **`latency_seconds`** is wall time **until the assistant reply has finished streaming**; **`postprocess_latency_seconds`** is the extra time for summarizer + memory manager after that; the **`orchestrator`** log row includes **`response_latency_seconds`**, **`postprocess_latency_seconds`**, and **`total_latency_seconds`** (their sum). Rolling **`/metrics`** chat latency uses the stream path’s **`latency_seconds`** (response-ready time).
 
 Questions about **chat meta** (e.g. your name, **document/file names**, what you uploaded) **skip vector retrieval** and go straight to context synthesis using conversation history — faster and fewer LLM calls on the retrieval path.
 
@@ -272,7 +275,7 @@ Response:
 ```
 
 #### GET `/api/v1/stats`
-System statistics (vector store counts, SQLite row counts, embedding model).
+System statistics (vector store counts, SQLite row counts, embedding model). If Chroma cannot open the on-disk catalog (upgrade skew, corruption, missing `_type` in config), **`vector_store.status`** is **`unavailable`** with a **`detail`** string and **`count`: 0** — the endpoint still returns **200** so the UI can load; delete **`CHROMA_PERSIST_DIR`** and re-ingest to restore counts. Dependencies pin **`posthog<6`** with Chroma because PostHog 6 broke telemetry `capture()` (see [chroma #4966](https://github.com/chroma-core/chroma/issues/4966)).
 
 #### GET `/api/v1/metrics`
 Rolling chat latency (average, p95) and request counters.
@@ -288,7 +291,7 @@ Server-Sent Events with **token-level streaming** during synthesis.
 SSE event types:
 
 - **`token`** — Partial assistant text (incremental).
-- **`done`** — Final payload aligned with `/chat` (`response`, `sources`, `agent_log`, `latency_seconds`, `conversation_summary`, …).
+- **`done`** — Final payload aligned with `/chat` (`response`, `sources`, `agent_log`, `latency_seconds`, `postprocess_latency_seconds`, `conversation_summary`, …). On this route, **`latency_seconds`** is time until the streamed reply is complete, not including summarizer/memory-manager work (see **`postprocess_latency_seconds`**).
 - **`error`** — Error detail.
 
 #### GET `/api/v1/health`

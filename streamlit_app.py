@@ -17,6 +17,10 @@ import streamlit as st
 DEFAULT_API = os.environ.get("API_BASE_URL", "http://127.0.0.1:8000").rstrip("/")
 # Pause between each chunk in st.write_stream (higher = slower typing effect).
 _UI_STREAM_DELAY_SEC = float(os.environ.get("STREAMLIT_STREAM_DELAY_SEC", "0.01"))
+# Short prompts use POST /chat (one JSON body) instead of SSE token streaming + typing delays.
+_SHORT_CHAT_SYNC_MAX_CHARS = int(
+    os.environ.get("STREAMLIT_SHORT_MESSAGE_SYNC_CHARS", "120")
+)
 
 # Single brand teal for Streamlit UI (no multi-shade accent ramp).
 _TEAL = "#14b8a6"
@@ -369,7 +373,15 @@ def api_get(
 
 
 def api_post(path: str, json_body: dict | None = None, **kw: Any) -> requests.Response:
-    return requests.post(f"{api_base()}{path}", json=json_body, timeout=600, **kw)
+    """POST JSON to the API. Accepts either a positional body or ``json=`` (requests-style)."""
+    alt_json = kw.pop("json", None)
+    if alt_json is not None and json_body is not None:
+        raise TypeError("Pass a body as the second positional argument or as json=, not both")
+    payload = json_body if json_body is not None else alt_json
+    timeout = kw.pop("timeout", 600)
+    return requests.post(
+        f"{api_base()}{path}", json=payload, timeout=timeout, **kw
+    )
 
 
 def _stream_text_chunks(text: str, chunk_size: int = 8):
@@ -384,11 +396,74 @@ def _stream_text_chunks(text: str, chunk_size: int = 8):
             time.sleep(_UI_STREAM_DELAY_SEC)
 
 
+def _finalize_assistant_turn_from_api(
+    done: dict[str, Any], *, client_t0: float | None
+) -> None:
+    """Latency line, session history, sources, and agent expander (shared by /chat and /chat/stream)."""
+    lat = done.get("latency_seconds")
+    if lat is None and client_t0 is not None:
+        lat = round(time.perf_counter() - client_t0, 2)
+    post_lat = done.get("postprocess_latency_seconds")
+    lat_html = f"⚡ {lat}s" if lat is not None else "⚡ —"
+    if post_lat is not None and float(post_lat) > 0.001:
+        lat_html += f" &nbsp;·&nbsp; post-reply {round(float(post_lat), 2)}s"
+    st.markdown(
+        f'<p class="cf-latency">{lat_html}</p>',
+        unsafe_allow_html=True,
+    )
+    st.session_state.messages.append(
+        {
+            "role": "assistant",
+            "content": done.get("response") or "",
+            "agent_log": done.get("agent_log") or [],
+        }
+    )
+    st.session_state.last_sources = done.get("sources") or []
+    st.session_state.last_agent_log = done.get("agent_log") or []
+    st.session_state.last_summary = done.get("conversation_summary") or ""
+    st.session_state.last_latency = lat
+    st.session_state.last_postprocess_latency = post_lat
+    render_source_pills(st.session_state.last_sources)
+    render_agent_decisions_expander(done.get("agent_log"))
+
+
+def run_sync_chat(sid: str, uid: str, prompt: str) -> bool:
+    """POST /api/v1/chat — avoids SSE and per-token UI delays for short messages."""
+    t0 = time.perf_counter()
+    try:
+        with st.spinner("Running agents & generating your answer…"):
+            r = api_post(
+                "/api/v1/chat",
+                {"session_id": sid, "user_id": uid, "message": prompt},
+            )
+        if r.status_code == 404:
+            st.error("Session not found. Start a new chat from the sidebar.")
+            return False
+        if r.status_code != 200:
+            st.error(f"Chat failed ({r.status_code}): {r.text}")
+            return False
+        body = r.json()
+    except requests.RequestException as e:
+        st.error(f"**Cannot reach the API.** Is it running?\n\n`{e}`")
+        return False
+
+    text = (body.get("response") or "").strip()
+    if text:
+        st.markdown(text)
+    else:
+        st.markdown("_No response text returned._")
+    _finalize_assistant_turn_from_api(body, client_t0=t0)
+    return True
+
+
 def run_streaming_chat(sid: str, uid: str, prompt: str) -> bool:
     """
-    POST /chat/stream (SSE). Streamlit only redraws progressively for ``st.write_stream``,
-    not for repeated ``empty().markdown`` in a loop—so we use a spinner while the graph runs
-    and a generator that yields ``token`` chunks (or falls back to chunking the final reply).
+    POST /chat/stream (SSE). Used when the prompt is longer than
+    ``STREAMLIT_SHORT_MESSAGE_SYNC_CHARS`` (see ``run_sync_chat`` for short prompts).
+
+    Streamlit only redraws progressively for ``st.write_stream``, not for repeated
+    ``empty().markdown`` in a loop—so we use a spinner while the graph runs and a generator
+    that yields ``token`` chunks (or falls back to chunking the final reply).
     """
     url = f"{api_base()}/api/v1/chat/stream"
     t0 = time.perf_counter()
@@ -467,28 +542,7 @@ def run_streaming_chat(sid: str, uid: str, prompt: str) -> bool:
             if not answer and int(stream_state.get("n_tokens", 0)) == 0:
                 st.markdown("_No response text returned._")
 
-            lat = done_payload.get("latency_seconds")
-            if lat is None:
-                lat = round(time.perf_counter() - t0, 2)
-            st.markdown(
-                f'<p class="cf-latency">⚡ {lat}s</p>',
-                unsafe_allow_html=True,
-            )
-            st.session_state.messages.append(
-                {
-                    "role": "assistant",
-                    "content": done_payload.get("response") or "",
-                    "agent_log": done_payload.get("agent_log") or [],
-                }
-            )
-            st.session_state.last_sources = done_payload.get("sources") or []
-            st.session_state.last_agent_log = done_payload.get("agent_log") or []
-            st.session_state.last_summary = (
-                done_payload.get("conversation_summary") or ""
-            )
-            st.session_state.last_latency = lat
-            render_source_pills(st.session_state.last_sources)
-            render_agent_decisions_expander(done_payload.get("agent_log"))
+            _finalize_assistant_turn_from_api(done_payload, client_t0=t0)
             return True
     except requests.RequestException as e:
         st.error(f"**Cannot reach the API.** Is it running?\n\n`{e}`")
@@ -675,9 +729,9 @@ def sidebar_branding() -> None:
     st.markdown(
         f'<div style="display:flex;align-items:flex-start;gap:12px;margin-bottom:4px;">'
         f'<span style="font-size:1.85rem;line-height:1;">🧠</span>'
-        f'<div><div style="font-weight:800;font-size:1.2rem;letter-spacing:-0.03em;color:#fafaf9;">'
+        f'<div><div style="font-weight:800;font-size:1.2rem;letter-spacing:-0.03em;color:{_TEAL};">'
         f"CogniFlow</div>"
-        f'<div style="font-size:0.78rem;color:{_TEAL};opacity:0.8;margin-top:4px;line-height:1.35;">'
+        f'<div style="font-size:0.78rem;color:{_TEAL};opacity:0.85;margin-top:4px;line-height:1.35;">'
         f"Document-grounded assistant</div></div></div>",
         unsafe_allow_html=True,
     )
@@ -708,6 +762,10 @@ def sidebar_new_chat(user_id: str) -> None:
                 st.session_state.last_agent_log = []
                 st.session_state.last_summary = ""
                 st.session_state.last_latency = None
+                st.session_state.last_postprocess_latency = None
+                st.session_state._prev_sidebar_user_id = (
+                    st.session_state.get("user_id") or ""
+                ).strip()
                 st.rerun()
             else:
                 st.error(r.text)
@@ -723,6 +781,7 @@ def _clear_active_if_dismissed(active_sid: str) -> None:
         st.session_state.last_agent_log = []
         st.session_state.last_summary = ""
         st.session_state.last_latency = None
+        st.session_state.last_postprocess_latency = None
 
 
 def sidebar_history(user_id: str, active_sid: str) -> None:
@@ -765,6 +824,7 @@ def sidebar_history(user_id: str, active_sid: str) -> None:
                     st.session_state.last_agent_log = []
                     st.session_state.last_summary = ""
                     st.session_state.last_latency = None
+                    st.session_state.last_postprocess_latency = None
                     st.rerun()
             with col_del:
                 if st.button(
@@ -782,6 +842,7 @@ def sidebar_history(user_id: str, active_sid: str) -> None:
                         st.session_state.last_agent_log = []
                         st.session_state.last_summary = ""
                         st.session_state.last_latency = None
+                        st.session_state.last_postprocess_latency = None
                     st.rerun()
 
     if st.button(
@@ -1014,10 +1075,37 @@ def sidebar_upload(active_session_id: str) -> None:
         )
 
 
+def _on_user_id_changed() -> None:
+    """Clear local chat when switching accounts so we never reuse another user's session_id."""
+    new_uid = (st.session_state.get("user_id") or "").strip()
+    prev = (st.session_state.get("_prev_sidebar_user_id") or "").strip()
+    if prev and prev != new_uid:
+        st.session_state.session_id = ""
+        st.session_state.messages = []
+        st.session_state.last_sources = []
+        st.session_state.last_agent_log = []
+        st.session_state.last_summary = ""
+        st.session_state.last_latency = None
+        st.session_state.last_postprocess_latency = None
+        st.session_state.dismissed_sessions = set()
+    st.session_state._prev_sidebar_user_id = new_uid
+
+
 def sidebar_settings() -> None:
     with st.expander("Settings", expanded=False):
-        st.text_input("User ID", key="user_id")
-        st.text_input("API base URL", key="api_base", placeholder=DEFAULT_API)
+        st.text_input(
+            "User ID",
+            key="user_id",
+            on_change=_on_user_id_changed,
+            help="Changing this clears the active chat in this tab so the next message uses the new account.",
+        )
+        st.text_input(
+            "API base URL",
+            key="api_base",
+            placeholder=DEFAULT_API,
+            help="Include scheme and host (no trailing slash). Health check runs after you edit.",
+        )
+        st.caption("After editing User ID or API URL, the page reruns; start **+ New chat** for that user.")
 
 
 def welcome_empty(api_ok: bool) -> None:
@@ -1063,32 +1151,40 @@ def main() -> None:
         st.session_state.last_summary = ""
     if "last_latency" not in st.session_state:
         st.session_state.last_latency = None
+    if "last_postprocess_latency" not in st.session_state:
+        st.session_state.last_postprocess_latency = None
     if "dismissed_sessions" not in st.session_state:
         st.session_state.dismissed_sessions = set()
     if "kb_upload_v_chat" not in st.session_state:
         st.session_state.kb_upload_v_chat = 0
     if "kb_upload_v_sidebar" not in st.session_state:
         st.session_state.kb_upload_v_sidebar = 0
+    if "_prev_sidebar_user_id" not in st.session_state:
+        st.session_state._prev_sidebar_user_id = (
+            st.session_state.get("user_id") or ""
+        ).strip()
 
-    ok, health_msg = check_health()
-    uid = str(st.session_state.user_id)
-    sid = str(st.session_state.session_id).strip()
-
+    ok = False
+    health_msg = ""
     with st.sidebar:
         sidebar_branding()
+        st.divider()
+        sidebar_settings()
+        ok, health_msg = check_health()
         sidebar_status(ok, health_msg)
         st.divider()
+        uid = (st.session_state.get("user_id") or "").strip() or "demo_user"
+        sid = str(st.session_state.get("session_id") or "").strip()
         sidebar_new_chat(uid)
         st.divider()
         sidebar_history(uid, sid)
         st.divider()
         sidebar_upload(sid)
-        st.divider()
-        sidebar_settings()
 
     st.markdown(
-        '<div class="cf-main-hero"><h1>CogniFlow</h1>'
-        "<p>Conversational RAG · LangGraph · ChromaDB</p></div>",
+        f'<div class="cf-main-hero"><h1 style="color:{_TEAL};-webkit-text-fill-color:{_TEAL};margin:0;">CogniFlow</h1>'
+        '<p style="color:#78716c;margin:0.25rem 0 0;font-size:0.8rem;">'
+        "Conversational RAG · LangGraph · ChromaDB</p></div>",
         unsafe_allow_html=True,
     )
 
@@ -1110,9 +1206,13 @@ def main() -> None:
         if st.session_state.last_sources:
             st.divider()
             lat = st.session_state.last_latency
+            post_lat = st.session_state.get("last_postprocess_latency")
             if lat is not None:
+                cap = f"⚡ Last response: {lat}s"
+                if post_lat is not None and float(post_lat) > 0.001:
+                    cap += f" · post-reply {round(float(post_lat), 2)}s"
                 st.markdown(
-                    f'<p class="cf-latency">⚡ Last response: {lat}s</p>',
+                    f'<p class="cf-latency">{cap}</p>',
                     unsafe_allow_html=True,
                 )
             render_source_pills(st.session_state.last_sources)
@@ -1123,7 +1223,15 @@ def main() -> None:
         st.markdown(prompt)
 
     with st.chat_message("assistant", avatar="🧠"):
-        run_streaming_chat(sid, uid, prompt)
+        plen = len(prompt.strip())
+        use_sync = (
+            _SHORT_CHAT_SYNC_MAX_CHARS > 0
+            and plen <= _SHORT_CHAT_SYNC_MAX_CHARS
+        )
+        if use_sync:
+            run_sync_chat(sid, uid, prompt)
+        else:
+            run_streaming_chat(sid, uid, prompt)
 
 
 if __name__ == "__main__":

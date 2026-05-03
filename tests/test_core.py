@@ -215,6 +215,11 @@ def test_query_intent_enum_values():
         "multi_part",
         "greeting",
         "off_topic",
+        "factual_doc",
+        "general_knowledge",
+        "meta",
+        "preference",
+        "session_recall",
     }
 
 
@@ -226,6 +231,9 @@ def test_retrieval_strategy_enum():
 def test_chat_meta_routing_skips_vector_path():
     assert query_answer_from_chat_skip_retrieval("What is the document name?") is True
     assert query_answer_from_chat_skip_retrieval("What did I upload?") is True
+    assert query_answer_from_chat_skip_retrieval("What documents do I have?") is True
+    assert query_answer_from_chat_skip_retrieval("Which files did you get?") is True
+    assert query_answer_from_chat_skip_retrieval("My uploads") is True
     assert query_answer_from_chat_skip_retrieval("What is my name?") is True
     assert (
         query_answer_from_chat_skip_retrieval(
@@ -252,6 +260,7 @@ def test_synthesis_prompts_helper():
     }
     system, user_block, docs, refuse = _synthesis_prompts(state)
     assert isinstance(system, str)
+    assert "Do **not** disclose internal stack" in system
     assert "test" in user_block
     assert refuse is None
 

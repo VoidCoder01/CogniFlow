@@ -3,12 +3,19 @@ from __future__ import annotations
 import os
 from typing import Any, Optional
 
+# Chroma reads this early; helps avoid noisy product telemetry on some installs.
+os.environ.setdefault("ANONYMIZED_TELEMETRY", "false")
+
 import chromadb
 from chromadb.config import Settings as ChromaSettings
 
 from config import settings
 from core.embeddings import EmbeddingManager
 from core.models import DocumentChunk, DocumentMetadata
+
+
+class ChromaPersistenceError(RuntimeError):
+    """Local Chroma SQLite/catalog is unreadable (version skew, corruption, or partial delete)."""
 
 
 class VectorStore:
@@ -28,10 +35,20 @@ class VectorStore:
             path=self.persist_dir,
             settings=ChromaSettings(anonymized_telemetry=False),
         )
-        self.collection = self._client.get_or_create_collection(
-            name=self.collection_name,
-            metadata={"hnsw:space": "cosine"},
-        )
+        try:
+            self.collection = self._client.get_or_create_collection(
+                name=self.collection_name,
+                metadata={"hnsw:space": "cosine"},
+            )
+        except KeyError as e:
+            if e.args == ("_type",):
+                raise ChromaPersistenceError(
+                    f"Incompatible or corrupted Chroma catalog under {self.persist_dir!r}. "
+                    "Fix: stop the API, run `python scripts/reset_chroma.py --yes` (or delete that "
+                    "folder manually), restart the API, then re-upload or re-ingest. "
+                    "Alternatively set CHROMA_PERSIST_DIR or CHROMA_COLLECTION_NAME to a fresh path."
+                ) from e
+            raise
         self.embedding_manager = EmbeddingManager()
 
     # ------------------------------------------------------------------

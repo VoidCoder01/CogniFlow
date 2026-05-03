@@ -26,6 +26,11 @@ class QueryIntent(str, Enum):
     multi_part = "multi_part"
     greeting = "greeting"
     off_topic = "off_topic"
+    factual_doc = "factual_doc"
+    general_knowledge = "general_knowledge"
+    meta = "meta"
+    preference = "preference"
+    session_recall = "session_recall"
 
 
 class RetrievalStrategy(str, Enum):
@@ -99,11 +104,16 @@ class AgentState(BaseModel):
     conversation_history: list[ChatMessage] = Field(default_factory=list)
     user_memory_context: str = ""
     query_intent: Optional[QueryIntent] = None
+    needs_retrieval: bool = True
+    needs_memory: bool = False
+    response_style: str = "short"
     needs_history: bool = False
     needs_rewrite: bool = False
     rewritten_query: str = ""
     retrieval_strategy: RetrievalStrategy = RetrievalStrategy.semantic
     retrieved_documents: list[dict] = Field(default_factory=list)
+    use_retrieved_context: bool = True
+    context_validation_reason: str = ""
     synthesized_context: str = ""
     response: str = ""
     should_summarize: bool = False
@@ -128,7 +138,14 @@ class ChatResponse(BaseModel):
     response: str
     sources: list[dict] = Field(default_factory=list)
     agent_log: list[dict] = Field(default_factory=list)
-    latency_seconds: Optional[float] = None
+    latency_seconds: Optional[float] = Field(
+        default=None,
+        description="Wall time until the assistant reply is ready (/chat/stream: after synthesis tokens).",
+    )
+    postprocess_latency_seconds: Optional[float] = Field(
+        default=None,
+        description="/chat/stream only: summarizer + memory manager after the reply text.",
+    )
     conversation_summary: str = ""
 
 

@@ -16,6 +16,14 @@ import core.response_cache as response_cache
 def _clear_response_cache(monkeypatch):
     """Isolate tests from SQLite persistence and avoid wiping dev ./data caches."""
     monkeypatch.setattr(settings, "chat_response_cache_backend", "memory")
+
+    class _DefaultFakeEmb:
+        def embed_text(self, text: str):
+            return [0.1] * 8
+
+    monkeypatch.setattr(
+        response_cache, "_get_embedding_manager", lambda: _DefaultFakeEmb()
+    )
     clear_for_tests()
     yield
     clear_for_tests()

@@ -10,8 +10,10 @@ langchain-groq>=0.2,<2.0
 langchain-google-genai>=2.0,<3.0
 langchain-community>=0.3,<2.0
 
-# Vector & embeddings
+# Vector & embeddings — pin posthog first so chromadb's transitive dep cannot pull 6+
+posthog>=2.4.0,<6.0.0
 chromadb>=0.5,<1.0
+# PostHog 6+ breaks chromadb.telemetry: capture() arity mismatch (terminal ERROR spam); chroma #4966
 sentence-transformers>=3.0,<4.0
 
 # Document loaders
