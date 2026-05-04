@@ -16,7 +16,7 @@ import streamlit as st
 
 DEFAULT_API = os.environ.get("API_BASE_URL", "http://127.0.0.1:8000").rstrip("/")
 # Pause between each chunk in st.write_stream (higher = slower typing effect).
-_UI_STREAM_DELAY_SEC = float(os.environ.get("STREAMLIT_STREAM_DELAY_SEC", "0.01"))
+_UI_STREAM_DELAY_SEC = float(os.environ.get("STREAMLIT_STREAM_DELAY_SEC", "0.05"))
 # Short prompts use POST /chat (one JSON body) instead of SSE token streaming + typing delays.
 _SHORT_CHAT_SYNC_MAX_CHARS = int(
     os.environ.get("STREAMLIT_SHORT_MESSAGE_SYNC_CHARS", "120")
