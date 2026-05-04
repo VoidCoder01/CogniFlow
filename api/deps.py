@@ -3,9 +3,9 @@ from __future__ import annotations
 import logging
 import time
 from functools import lru_cache
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Annotated
 
-from fastapi import HTTPException
+from fastapi import Depends, Header, HTTPException, Request
 
 from agents.orchestrator import CogniFlowOrchestrator
 from config import settings
@@ -85,6 +85,56 @@ def peek_vector_store() -> tuple["VectorStore | None", str | None]:
 @lru_cache(maxsize=1)
 def get_orchestrator() -> CogniFlowOrchestrator:
     return CogniFlowOrchestrator()
+
+
+def verify_api_key(
+    request: Request,
+    store: Annotated[MemoryStore, Depends(get_memory_store)],
+    x_api_key: Annotated[str | None, Header(alias="X-API-Key")] = None,
+) -> str | None:
+    """When ``api_auth_enabled``, require ``X-API-Key`` and return the owning ``user_id``."""
+    import config as _cfg
+
+    if not _cfg.settings.api_auth_enabled:
+        return None
+    path = (request.url.path or "").rstrip("/")
+    if path.endswith("/health"):
+        return None
+    raw = (x_api_key or "").strip()
+    if not raw:
+        raise HTTPException(status_code=401, detail="Missing X-API-Key header")
+    uid = store.lookup_user_for_api_key(raw)
+    if not uid:
+        raise HTTPException(status_code=401, detail="Invalid API key")
+    return uid
+
+
+def ensure_api_user_matches(auth_uid: str | None, user_id: str) -> None:
+    """Reject mismatched ``user_id`` when an API key authenticated the request."""
+    if auth_uid is None:
+        return
+    if (user_id or "").strip() != auth_uid.strip():
+        raise HTTPException(
+            status_code=403, detail="user_id does not match API key owner"
+        )
+
+
+def ensure_api_user_owns_session(
+    auth_uid: str | None, store: MemoryStore, session_id: str
+) -> None:
+    """Reject access to another user's session when API auth is on."""
+    if auth_uid is None:
+        return
+    sid = (session_id or "").strip()
+    if not sid:
+        raise HTTPException(status_code=422, detail="session_id is required")
+    sess = store.get_session(sid)
+    if sess is None:
+        return
+    if (sess.user_id or "").strip() != auth_uid.strip():
+        raise HTTPException(
+            status_code=403, detail="API key is not authorized for this session"
+        )
 
 
 def clear_app_caches() -> None:

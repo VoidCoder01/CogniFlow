@@ -22,6 +22,7 @@ def test_memory_store_session_and_messages(tmp_path):
     counts = store.table_counts()
     assert counts["sessions"] == 1
     assert counts["messages"] == 1
+    assert counts.get("api_keys_active", 0) == 0
 
 
 def test_document_processor_markdown_chunks(tmp_path):

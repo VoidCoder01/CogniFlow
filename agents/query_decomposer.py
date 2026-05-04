@@ -48,7 +48,7 @@ def query_decomposer_node(state: CogniFlowState) -> dict[str, Any]:
         out = model.invoke(messages)
         sub_queries = out.sub_queries or [query]
     except Exception as exc:
-        logger.warning("query_decomposer failed: %s", exc)
+        logger.warning("query_decomposer failed: %s", exc, exc_info=True)
         sub_queries = [query]
 
     log_entry = with_log_timing(

@@ -58,6 +58,19 @@ class Settings(BaseSettings):
     openai_embedding_model: str = "text-embedding-3-small"
     chroma_persist_dir: str = "./data/chroma"
     chroma_collection_name: str = "cogniflow_docs"
+    chroma_server_host: str = Field(
+        default="",
+        description=(
+            "If set (e.g. `chroma` in Docker), use ChromaDB HttpClient to this host; "
+            "otherwise use embedded PersistentClient under CHROMA_PERSIST_DIR."
+        ),
+    )
+    chroma_server_port: int = Field(
+        default=8000,
+        ge=1,
+        le=65535,
+        description="Port for remote Chroma server (CHROMA_SERVER_HOST).",
+    )
     sqlite_db_path: str = "./data/memory.db"
 
     # Chunking & conversation
@@ -95,9 +108,20 @@ class Settings(BaseSettings):
     # API
     api_host: str = "0.0.0.0"
     api_port: int = 8000
+    api_auth_enabled: bool = Field(
+        default=False,
+        description="If true, require valid X-API-Key on API routes (except /health).",
+    )
+    api_admin_secret: str = Field(
+        default="",
+        description="If set, POST /users/{user_id}/api-keys requires matching X-Admin-Secret to mint keys.",
+    )
     expose_internal_errors: bool = Field(
         default=False,
-        description="If true, /chat 500 responses include full exception text (dev only).",
+        description=(
+            "If true, HTTP 500 and SSE error events include full exception text (dev only). "
+            "When false, clients get a generic message; details stay in server logs."
+        ),
     )
 
     # Response cache (exact + optional semantic similarity; cleared on upload for that session)

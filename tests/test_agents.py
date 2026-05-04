@@ -44,9 +44,15 @@ class TestQueryUnderstandingHeuristics:
         )
         assert intent == "multi_part"
 
-    def test_factual_default(self):
+    def test_general_knowledge_default(self):
         intent, _, _ = _heuristic_classify(
             "how does dependency injection work in FastAPI", ""
+        )
+        assert intent == "general_knowledge"
+
+    def test_factual_when_doc_signal(self):
+        intent, _, _ = _heuristic_classify(
+            "what does my uploaded file say about timeouts?", ""
         )
         assert intent == "factual"
 
@@ -233,7 +239,7 @@ class TestConversationSummarizerNode:
 
 
 class TestSynthesisPromptIsolation:
-    def test_meta_excludes_cross_session_blocks(self):
+    def test_meta_includes_user_memory_for_cross_session_prefs(self):
         state = {
             "session_id": "s1",
             "user_id": "u1",
@@ -245,13 +251,34 @@ class TestSynthesisPromptIsolation:
             "needs_retrieval": False,
             "use_retrieved_context": False,
             "user_memory_context": "User likes bullet lists.",
-            "cross_session_context": "OTHER_SESSION_SUMMARY_SHOULD_NOT_APPEAR",
+            "cross_session_context": "OTHER_SESSION_SUMMARY",
             "response_style": "short",
         }
         _system, user_block, _docs, _fast = _synthesis_prompts(state)
-        assert "OTHER_SESSION" not in user_block
-        assert "Other recent chats" not in user_block
+        assert "Known user preferences" in user_block
+        assert "User likes bullet lists." in user_block
+        assert "Other recent chats" in user_block
+        assert "OTHER_SESSION_SUMMARY" in user_block
+
+    def test_session_recall_strips_memory_and_peer_blocks(self):
+        state = {
+            "session_id": "s1",
+            "user_id": "u1",
+            "user_query": "What did I ask earlier?",
+            "query_intent": "session_recall",
+            "conversation_history": [{"role": "user", "content": "Hi"}],
+            "conversation_summary": "",
+            "retrieved_documents": [],
+            "needs_retrieval": False,
+            "use_retrieved_context": False,
+            "user_memory_context": "User prefers Python.",
+            "cross_session_context": "OTHER_CHAT",
+            "response_style": "short",
+        }
+        _system, user_block, _docs, _fast = _synthesis_prompts(state)
         assert "Known user preferences" not in user_block
+        assert "Other recent chats" not in user_block
+        assert "OTHER_CHAT" not in user_block
 
 
 class TestContextValidationNode:

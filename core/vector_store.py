@@ -26,15 +26,24 @@ class VectorStore:
         persist_dir: str = None,
         collection_name: str = None,
     ):
-        self.persist_dir = persist_dir or settings.chroma_persist_dir
         self.collection_name = collection_name or settings.chroma_collection_name
+        remote_host = (getattr(settings, "chroma_server_host", None) or "").strip()
+        remote_port = int(getattr(settings, "chroma_server_port", 8000) or 8000)
 
-        os.makedirs(self.persist_dir, exist_ok=True)
-
-        self._client = chromadb.PersistentClient(
-            path=self.persist_dir,
-            settings=ChromaSettings(anonymized_telemetry=False),
-        )
+        if remote_host:
+            self.persist_dir = ""
+            self._client = chromadb.HttpClient(
+                host=remote_host,
+                port=remote_port,
+                settings=ChromaSettings(anonymized_telemetry=False),
+            )
+        else:
+            self.persist_dir = persist_dir or settings.chroma_persist_dir
+            os.makedirs(self.persist_dir, exist_ok=True)
+            self._client = chromadb.PersistentClient(
+                path=self.persist_dir,
+                settings=ChromaSettings(anonymized_telemetry=False),
+            )
         try:
             self.collection = self._client.get_or_create_collection(
                 name=self.collection_name,
@@ -42,10 +51,15 @@ class VectorStore:
             )
         except KeyError as e:
             if e.args == ("_type",):
+                loc = (
+                    f"{remote_host}:{remote_port}"
+                    if remote_host
+                    else repr(self.persist_dir)
+                )
                 raise ChromaPersistenceError(
-                    f"Incompatible or corrupted Chroma catalog under {self.persist_dir!r}. "
-                    "Fix: stop the API, run `python scripts/reset_chroma.py --yes` (or delete that "
-                    "folder manually), restart the API, then re-upload or re-ingest. "
+                    f"Incompatible or corrupted Chroma catalog at {loc}. "
+                    "Fix: stop the API, run `python scripts/reset_chroma.py --yes` (embedded mode) "
+                    "or reset the remote Chroma volume, restart, then re-upload or re-ingest. "
                     "Alternatively set CHROMA_PERSIST_DIR or CHROMA_COLLECTION_NAME to a fresh path."
                 ) from e
             raise

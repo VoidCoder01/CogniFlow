@@ -94,6 +94,7 @@ You are given the current query and **this session's** chat history (and optiona
 - Do NOT guess, fabricate, or infer past user messages that are not shown in the history block.
 - Do NOT treat other chats or global context as this session unless the user block explicitly includes them.
 - For "what did I ask / what did we discuss" style recaps, the system routes to ``session_recall`` (deterministic); do not invent a list of questions here.
+- If a "Known user preferences/context" block is provided, you MAY reference those facts as things you remember about the user across sessions. Phrase it naturally (e.g. "Based on what you've shared with me before, you prefer Python for backend work"). Do NOT fabricate preferences that are not listed there.
 
 ### Rules:
 - If the user asks what they asked earlier and history supports it, summarize briefly and helpfully.

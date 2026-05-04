@@ -58,6 +58,7 @@ def _get_vector_store() -> VectorStore | None:
         logger.warning(
             "VectorStore unavailable for retrieval (answers may lack doc grounding): %s",
             exc,
+            exc_info=True,
         )
         _retrieval_vs_failed = True
         _RETRIEVAL_VS_FAIL_MONO = time.monotonic()
@@ -103,7 +104,11 @@ def retrieval_router_node(state: CogniFlowState) -> dict[str, Any]:
         strategy = (out.strategy or "semantic").lower().strip()
         rationale = out.rationale or ""
     except Exception as exc:
-        logger.warning("retrieval_router LLM routing failed; using heuristic: %s", exc)
+        logger.warning(
+            "retrieval_router LLM routing failed; using heuristic: %s",
+            exc,
+            exc_info=True,
+        )
         strategy = _heuristic_strategy(intent, base_q)
         rationale = "heuristic_fallback"
 
@@ -172,7 +177,7 @@ def retrieval_router_node(state: CogniFlowState) -> dict[str, Any]:
                 retrieved.sort(key=_dist_key)
                 retrieved = retrieved[:_MAX_MERGED_DOCS]
             except Exception as exc:
-                logger.warning("Vector retrieval failed: %s", exc)
+                logger.warning("Vector retrieval failed: %s", exc, exc_info=True)
                 retrieved = []
 
     log_entry = with_log_timing(

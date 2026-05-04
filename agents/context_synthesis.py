@@ -45,7 +45,9 @@ _SYSTEM_PREFERENCE = """You are CogniFlow. The user stated a format or style pre
 
 Reply briefly: acknowledge what you will do from now on in this chat, in plain language. Do not list internal systems or storage."""
 
-_SYSTEM_GREETING = """You are CogniFlow, a friendly assistant. Reply warmly and briefly. Invite them to share what they are working on or ask next—without mentioning documents or retrieval unless they already did."""
+_SYSTEM_GREETING = """You are CogniFlow, a friendly assistant. Reply warmly and briefly. Invite them to share what they are working on or ask next—without mentioning documents or retrieval unless they already did.
+
+CRITICAL: Do NOT address the user by any name unless they explicitly stated their name in this conversation. Never guess, infer, or invent a name."""
 
 _SYSTEM_CHAT_AND_DOCS = """You are CogniFlow for this chat.
 
@@ -118,7 +120,7 @@ def _synthesis_prompts(state: CogniFlowState) -> tuple[str, str, list[dict[str, 
         system = _SYSTEM_GREETING
     elif intent == "preference":
         system = _SYSTEM_PREFERENCE
-    elif intent in ("meta", "follow_up"):
+    elif intent in ("meta", "follow_up", "session_recall"):
         system = _SYSTEM_MEMORY
     elif not needs_rag:
         system = _SYSTEM_KNOWLEDGE
@@ -133,8 +135,9 @@ def _synthesis_prompts(state: CogniFlowState) -> tuple[str, str, list[dict[str, 
     mem_ctx = (state.get("user_memory_context") or "").strip()
     peer_ctx = (state.get("cross_session_context") or "").strip()
     doc_block = _format_docs(effective_docs)
-    # meta / follow_up: session thread only — never build cross-session blocks for the LLM
-    if intent in ("meta", "follow_up"):
+    # session_recall is a deterministic turn — skip memory blocks (correct by design).
+    # meta and follow_up NEED user-scoped memory so cross-session preferences surface.
+    if intent == "session_recall":
         mem_block = ""
         peer_block = ""
     else:
@@ -155,9 +158,7 @@ def _synthesis_prompts(state: CogniFlowState) -> tuple[str, str, list[dict[str, 
             "\n\nAnswer depth: default to a concise reply (about one short paragraph or a few bullets); "
             "expand only if the question clearly needs more depth."
         )
-    # Meta / follow_up: session thread only — do not inject peer summaries or user-memory blocks
-    # into the recall context (avoids cross-session leakage for "what did we discuss?").
-    if intent in ("meta", "follow_up"):
+    if intent == "session_recall":
         common_head = (
             f"Conversation summary (this session only): {summary or '(none)'}\n\n"
         )
@@ -166,7 +167,7 @@ def _synthesis_prompts(state: CogniFlowState) -> tuple[str, str, list[dict[str, 
             f"Conversation summary (if any): {summary or '(none)'}\n\n"
             f"{mem_block}{peer_block}"
         )
-    if intent in ("meta", "follow_up"):
+    if intent == "session_recall":
         user_block = (
             f"{common_head}"
             f"Chat history (this session only):\n{hist_snip or '(empty)'}\n\n"

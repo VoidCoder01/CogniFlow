@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import os
+import secrets
 import sqlite3
 import threading
 from datetime import datetime
@@ -91,6 +93,16 @@ class MemoryStore:
                     ON sessions(user_id);
                 CREATE INDEX IF NOT EXISTS idx_user_memory_user_id
                     ON user_memory(user_id);
+
+                CREATE TABLE IF NOT EXISTS api_keys (
+                    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+                    user_id    TEXT NOT NULL,
+                    key_hash   TEXT NOT NULL UNIQUE,
+                    created_at TEXT NOT NULL,
+                    revoked    INTEGER NOT NULL DEFAULT 0
+                );
+                CREATE INDEX IF NOT EXISTS idx_api_keys_user_id
+                    ON api_keys(user_id);
             """)
             conn.commit()
         finally:
@@ -400,8 +412,46 @@ class MemoryStore:
         sessions = conn.execute("SELECT COUNT(*) FROM sessions").fetchone()[0]
         messages = conn.execute("SELECT COUNT(*) FROM messages").fetchone()[0]
         memories = conn.execute("SELECT COUNT(*) FROM user_memory").fetchone()[0]
+        keys = conn.execute(
+            "SELECT COUNT(*) FROM api_keys WHERE revoked = 0"
+        ).fetchone()[0]
         return {
             "sessions": int(sessions),
             "messages": int(messages),
             "user_memory_rows": int(memories),
+            "api_keys_active": int(keys),
         }
+
+    def create_api_key(self, user_id: str) -> str:
+        """Insert a new API key for ``user_id``; returns the plaintext secret once (store it client-side)."""
+        uid = (user_id or "").strip()
+        if not uid:
+            raise ValueError("user_id is required")
+        raw = "cf_" + secrets.token_urlsafe(32)
+        key_hash = hashlib.sha256(raw.encode()).hexdigest()
+        conn = self._get_conn()
+        conn.execute(
+            """
+            INSERT INTO api_keys (user_id, key_hash, created_at, revoked)
+            VALUES (?, ?, ?, 0)
+            """,
+            (uid, key_hash, datetime.utcnow().isoformat()),
+        )
+        conn.commit()
+        return raw
+
+    def lookup_user_for_api_key(self, raw_key: str) -> Optional[str]:
+        """Return ``user_id`` if ``raw_key`` matches an active stored key hash."""
+        rk = (raw_key or "").strip()
+        if not rk:
+            return None
+        key_hash = hashlib.sha256(rk.encode()).hexdigest()
+        conn = self._get_conn()
+        row = conn.execute(
+            """
+            SELECT user_id FROM api_keys
+            WHERE key_hash = ? AND revoked = 0
+            """,
+            (key_hash,),
+        ).fetchone()
+        return str(row["user_id"]) if row else None

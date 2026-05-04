@@ -17,15 +17,19 @@ logger = logging.getLogger(__name__)
 def _summary_system_prompt(message_count: int, avg_msg_len: int) -> str:
     """System instructions sized from message volume and ``summary_compression_ratio``."""
     ratio = float(settings.summary_compression_ratio)
+    max_bullets = int(settings.summary_max_bullets)
     target_chars = int(max(120, message_count * max(avg_msg_len, 20) * ratio))
     target_sentences = max(2, min(12, target_chars // 80))
     return (
         f"Summarize this conversation in approximately {target_sentences} sentences "
         f"(~{target_chars} characters).\n\n"
+        f"Configured limits (must respect): target compression ratio ≈ {ratio:.2f} "
+        f"(keep roughly that fraction of salient detail versus raw message volume); "
+        f"if you use bullet lines, at most {max_bullets} bullets total — prefer compact prose when possible.\n\n"
         "PRESERVE: user goals, decisions made, unresolved issues, specific technical details "
         "(version numbers, error codes, config values, file names).\n"
         "DROP: greetings, filler, repeated questions, assistant explanations that were superseded by later corrections.\n"
-        "Output plain text only — no bullet points, no headers, no markdown."
+        "Output plain text only — no markdown headings; bullets only if they stay within the bullet cap above."
     )
 
 

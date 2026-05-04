@@ -77,7 +77,9 @@ def memory_manager_node(state: CogniFlowState) -> dict[str, Any]:
         out: MemoryExtractionResult = model.invoke(messages)
         items = [i.model_dump() for i in (out.items or [])]
     except Exception as exc:
-        logger.warning("memory_manager structured output failed: %s", exc)
+        logger.warning(
+            "memory_manager structured output failed: %s", exc, exc_info=True
+        )
         items = []
 
     log_entry = with_log_timing(

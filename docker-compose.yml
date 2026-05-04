@@ -1,4 +1,13 @@
 services:
+  chroma:
+    image: chromadb/chroma:latest
+    container_name: cogniflow-chroma
+    ports:
+      - "8001:8000"
+    volumes:
+      - chroma_data:/data
+    restart: unless-stopped
+
   api:
     build: .
     container_name: cogniflow-api
@@ -7,12 +16,16 @@ services:
     env_file:
       - .env
     environment:
-      CHROMA_PERSIST_DIR: /app/data/chroma
+      ALLOWED_ORIGINS: "http://localhost:3000,http://localhost:8501"
+      CHROMA_SERVER_HOST: chroma
+      CHROMA_SERVER_PORT: "8000"
       SQLITE_DB_PATH: /app/data/memory.db
       CHECKPOINT_SQLITE_PATH: /app/data/checkpoints.db
       CHAT_RESPONSE_CACHE_SQLITE_PATH: /app/data/response_cache.db
     volumes:
       - cogniflow_data:/app/data
+    depends_on:
+      - chroma
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8000/api/v1/health"]
       interval: 30s
@@ -39,8 +52,8 @@ services:
     env_file:
       - .env
     environment:
+      ALLOWED_ORIGINS: "http://localhost:3000,http://localhost:8501"
       API_BASE_URL: http://api:8000
-      CHROMA_PERSIST_DIR: /app/data/chroma
       SQLITE_DB_PATH: /app/data/memory.db
     volumes:
       - cogniflow_data:/app/data
@@ -51,3 +64,4 @@ services:
 
 volumes:
   cogniflow_data:
+  chroma_data:

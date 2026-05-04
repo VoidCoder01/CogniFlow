@@ -140,6 +140,15 @@ def _state_from_heuristic(user_q: str, hist_snip: str) -> dict[str, Any]:
             "needs_history": nh,
             "needs_rewrite": False,
         }
+    if intent_old == "general_knowledge":
+        return {
+            "query_intent": "general_knowledge",
+            "needs_retrieval": False,
+            "needs_memory": False,
+            "response_style": style,
+            "needs_history": nh,
+            "needs_rewrite": False,
+        }
     if intent_old == "multi_part":
         return {
             "query_intent": "multi_part",
@@ -262,7 +271,28 @@ def _heuristic_classify(query: str, history_snippet: str) -> tuple[str, bool, bo
         return "comparison", True, False
     if q.count("?") > 1 or (" and " in q and "?" in q):
         return "multi_part", False, False
-    return "factual", False, False
+    _doc_signals = (
+        "your document",
+        "the document",
+        "the pdf",
+        "uploaded file",
+        "my upload",
+        "in the file",
+        "according to the",
+        "from my doc",
+        "indexed",
+        "in my readme",
+        "the readme",
+        "section ",
+        "page ",
+        "in the spec",
+        "the spec",
+        "what does my",
+        "from the pdf",
+    )
+    if any(s in q for s in _doc_signals):
+        return "factual", False, False
+    return "general_knowledge", False, False
 
 
 def query_understanding_node(state: CogniFlowState) -> dict[str, Any]:
@@ -317,7 +347,9 @@ def query_understanding_node(state: CogniFlowState) -> dict[str, Any]:
         patch = _coerce_router_output(out, str(user_q), hist_snip)
     except Exception as exc:
         logger.warning(
-            "query_understanding structured output failed, using heuristic: %s", exc
+            "query_understanding structured output failed, using heuristic: %s",
+            exc,
+            exc_info=True,
         )
         patch = _state_from_heuristic(user_q, hist_snip)
         if patch.get("query_intent") == "factual_doc":

@@ -177,12 +177,11 @@ class CogniFlowOrchestrator:
         payload.setdefault("context_validation_reason", "")
         return payload
 
-    # NOTE: The streaming helpers below (run_until_before_synthesis,
-    # iter_streaming_synthesis, finalize_after_synthesis) invoke agent nodes
-    # directly rather than through the compiled LangGraph. This bypasses
-    # LangGraph's checkpointing for the streaming path, which is acceptable
-    # for this prototype. In production, use LangGraph's native astream_events
-    # API once it supports per-node streaming with checkpointing.
+    # Streaming helpers (run_until_before_synthesis, iter_streaming_synthesis,
+    # finalize_after_synthesis) run nodes outside the compiled graph so tokens
+    # can stream from the LLM. After finalize_after_synthesis, we persist the
+    # resulting state with graph.update_state(...) so SQLite checkpoints align
+    # with the non-streaming invoke() path for the same thread_id (session_id).
 
     def run_until_before_synthesis(self, graph_state: dict[str, Any]) -> None:
         """Execute QU → optional QR/QD → retrieval; skip synthesis (used for SSE streaming)."""
@@ -220,6 +219,27 @@ class CogniFlowOrchestrator:
         """Run summarizer + memory manager after the assistant reply exists."""
         merge_graph_patch(graph_state, conversation_summarizer_node(graph_state))
         merge_graph_patch(graph_state, memory_manager_node(graph_state))
+        self._persist_streaming_checkpoint(graph_state)
+
+    def _persist_streaming_checkpoint(self, graph_state: dict[str, Any]) -> None:
+        """Mirror LangGraph checkpoint state after a manually streamed turn."""
+        if getattr(self.graph, "checkpointer", None) is None:
+            return
+        sid = (graph_state.get("session_id") or "").strip()
+        if not sid:
+            return
+        try:
+            self.graph.update_state(
+                {"configurable": {"thread_id": sid}},
+                graph_state,
+                as_node="memory_manager",
+            )
+        except Exception as exc:
+            logger.warning(
+                "streaming checkpoint persist failed (non-fatal): %s",
+                exc,
+                exc_info=True,
+            )
 
     def iter_streaming_synthesis(self, graph_state: dict[str, Any]) -> Iterator[dict[str, Any]]:
         """Yield token and complete events from streaming LLM synthesis."""

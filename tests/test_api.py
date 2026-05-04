@@ -5,6 +5,7 @@ from unittest.mock import MagicMock
 import pytest
 from fastapi.testclient import TestClient
 
+from agents.graph_state import agent_state_to_graph
 from core.models import AgentState, QueryIntent, RetrievalStrategy
 
 
@@ -37,8 +38,45 @@ class _FakeOrchestrator:
         )
 
 
+class _FakeStreamingOrchestrator:
+    """Minimal orchestrator for ``/chat/stream`` without real LangGraph or LLM."""
+
+    def prepare_graph_payload(self, state: AgentState) -> dict:
+        payload = agent_state_to_graph(state)
+        payload.setdefault("memory_updates", [])
+        payload.setdefault("agent_log", [])
+        payload.setdefault("sub_queries", [])
+        payload.setdefault("use_retrieved_context", True)
+        payload.setdefault("context_validation_reason", "")
+        return payload
+
+    def run_until_before_synthesis(self, graph_state: dict) -> None:
+        graph_state["query_intent"] = "general_knowledge"
+        graph_state["needs_retrieval"] = False
+        graph_state.setdefault("agent_log", []).append(
+            {"node": "query_understanding", "intent": "general_knowledge"}
+        )
+
+    def iter_streaming_synthesis(self, graph_state: dict):
+        yield {"type": "token", "data": "Hel"}
+        yield {"type": "token", "data": "lo"}
+        yield {
+            "type": "complete",
+            "response": "Hello stream",
+            "synthesized_context": "",
+            "retrieved_documents": [],
+            "agent_log": [{"node": "context_synthesis"}],
+        }
+
+    def finalize_after_synthesis(self, graph_state: dict) -> None:
+        graph_state.setdefault("agent_log", []).append(
+            {"node": "conversation_summarizer", "skipped": True}
+        )
+
+
 @pytest.fixture()
 def client(tmp_path, monkeypatch, clear_singletons):
+    pytest.importorskip("multipart", reason="FastAPI File/Form routes require python-multipart")
     monkeypatch.setenv("SQLITE_DB_PATH", str(tmp_path / "memory.db"))
     monkeypatch.setenv("CHROMA_PERSIST_DIR", str(tmp_path / "chroma"))
     monkeypatch.setenv("CHAT_RESPONSE_CACHE_BACKEND", "memory")
@@ -254,3 +292,93 @@ def test_agent_logs_endpoint(client: TestClient):
 def test_agent_logs_not_found(client: TestClient):
     r = client.get("/api/v1/sessions/not-a-real-session/agent-logs")
     assert r.status_code == 404
+
+
+@pytest.fixture()
+def stream_client(tmp_path, monkeypatch, clear_singletons):
+    """App + deps for streaming tests (fake streaming orchestrator)."""
+    pytest.importorskip("multipart", reason="FastAPI File/Form routes require python-multipart")
+    monkeypatch.setenv("SQLITE_DB_PATH", str(tmp_path / "memory.db"))
+    monkeypatch.setenv("CHROMA_PERSIST_DIR", str(tmp_path / "chroma"))
+    monkeypatch.setenv("CHAT_RESPONSE_CACHE_BACKEND", "memory")
+    monkeypatch.setenv("CHAT_EXACT_MESSAGE_CACHE_ENABLED", "false")
+
+    import importlib
+
+    import config as cfg
+
+    importlib.reload(cfg)
+    import main
+
+    importlib.reload(main)
+
+    from api.deps import get_memory_store, get_orchestrator, get_vector_store
+
+    app = main.app
+    store = __import__("core.memory_store", fromlist=["MemoryStore"]).MemoryStore(
+        db_path=str(tmp_path / "memory.db")
+    )
+    fake_vs = MagicMock()
+    fake_vs.get_collection_stats = MagicMock(return_value={"name": "mock", "count": 0})
+    fake_vs.has_document = MagicMock(return_value=False)
+
+    app.dependency_overrides[get_memory_store] = lambda: store
+    app.dependency_overrides[get_orchestrator] = lambda: _FakeStreamingOrchestrator()
+    app.dependency_overrides[get_vector_store] = lambda: fake_vs
+
+    with TestClient(app) as c:
+        yield c
+
+    app.dependency_overrides.clear()
+
+
+def test_chat_stream_yields_tokens_and_done(stream_client: TestClient):
+    r_sess = stream_client.post("/api/v1/sessions", json={"user_id": "streamer"})
+    sid = r_sess.json()["session_id"]
+    with stream_client.stream(
+        "POST",
+        "/api/v1/chat/stream",
+        json={"session_id": sid, "user_id": "streamer", "message": "Hi"},
+    ) as r:
+        assert r.status_code == 200
+        raw = b"".join(r.iter_bytes())
+    text = raw.decode("utf-8")
+    assert "event" in text and "token" in text
+    assert "done" in text
+    assert "Hello stream" in text
+
+
+def test_chat_stream_unknown_session_returns_404(stream_client: TestClient):
+    r = stream_client.post(
+        "/api/v1/chat/stream",
+        json={
+            "session_id": "00000000-0000-0000-0000-000000000000",
+            "user_id": "u",
+            "message": "x",
+        },
+    )
+    assert r.status_code == 404
+
+
+def test_chat_invoke_error_returns_500(client: TestClient, monkeypatch):
+    bad = MagicMock()
+    bad.invoke.side_effect = RuntimeError("simulated provider failure")
+
+    def _orch():
+        return bad
+
+    from api.deps import get_orchestrator
+
+    client.app.dependency_overrides[get_orchestrator] = _orch
+    try:
+        r_sess = client.post("/api/v1/sessions", json={"user_id": "err-user"})
+        sid = r_sess.json()["session_id"]
+        r = client.post(
+            "/api/v1/chat",
+            json={"session_id": sid, "user_id": "err-user", "message": "boom"},
+        )
+        assert r.status_code == 500
+        body = r.json()
+        assert "detail" in body
+    finally:
+        client.app.dependency_overrides.pop(get_orchestrator, None)

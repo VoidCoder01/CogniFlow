@@ -364,12 +364,22 @@ def format_sidebar_datetime(ts_raw: str) -> str:
         return s[:19].replace("T", " ") if len(s) >= 19 else s
 
 
+def _api_headers() -> dict[str, str]:
+    k = (st.session_state.get("api_key") or "").strip()
+    return {"X-API-Key": k} if k else {}
+
+
 def api_get(
     path: str,
     timeout: int = 30,
     params: dict[str, str] | None = None,
 ) -> requests.Response:
-    return requests.get(f"{api_base()}{path}", timeout=timeout, params=params or {})
+    return requests.get(
+        f"{api_base()}{path}",
+        timeout=timeout,
+        params=params or {},
+        headers=_api_headers(),
+    )
 
 
 def api_post(path: str, json_body: dict | None = None, **kw: Any) -> requests.Response:
@@ -379,8 +389,9 @@ def api_post(path: str, json_body: dict | None = None, **kw: Any) -> requests.Re
         raise TypeError("Pass a body as the second positional argument or as json=, not both")
     payload = json_body if json_body is not None else alt_json
     timeout = kw.pop("timeout", 600)
+    h = {**_api_headers(), **(kw.pop("headers", None) or {})}
     return requests.post(
-        f"{api_base()}{path}", json=payload, timeout=timeout, **kw
+        f"{api_base()}{path}", json=payload, timeout=timeout, headers=h, **kw
     )
 
 
@@ -475,6 +486,7 @@ def run_streaming_chat(sid: str, uid: str, prompt: str) -> bool:
             json={"session_id": sid, "user_id": uid, "message": prompt},
             stream=True,
             timeout=600,
+            headers=_api_headers(),
         ) as resp:
             if resp.status_code == 404:
                 st.error("Session not found. Start a new chat from the sidebar.")
@@ -696,8 +708,12 @@ def render_agent_decisions_expander(agent_log: list | None, *, expanded: bool = 
     """Human-readable pipeline timeline for assistant turns (explainability)."""
     if not agent_log:
         return
+    rows = [e for e in agent_log if isinstance(e, dict)]
+    qu_idx = [i for i, e in enumerate(rows) if e.get("node") == "query_understanding"]
+    if len(qu_idx) > 1:
+        rows = rows[qu_idx[-1] :]
     with st.expander("🔍 Agent decisions", expanded=expanded):
-        for entry in agent_log:
+        for entry in rows:
             if not isinstance(entry, dict):
                 continue
             node = entry.get("node", "?")
@@ -874,6 +890,7 @@ def _post_one_document(
         files=files,
         data={"session_id": session_id},
         timeout=600,
+        headers=_api_headers(),
     )
     if r.status_code != 200:
         return r.status_code, r.text
@@ -1016,11 +1033,12 @@ def chat_area_document_upload(active_session_id: str) -> None:
     )
     _v = int(st.session_state.get("kb_upload_v_chat", 0))
     cu = st.file_uploader(
-        "Add files for this conversation",
+        "Add files for this conversation (max 50MB per file)",
         type=["pdf", "md", "markdown", "html", "htm"],
         accept_multiple_files=True,
         key=f"chat_kb_upload_{_v}",
         label_visibility="collapsed",
+        help="PDF, Markdown, or HTML — up to 50MB per file.",
     )
     if cu:
         st.markdown(
@@ -1048,11 +1066,12 @@ def sidebar_upload(active_session_id: str) -> None:
     _flush_kb_notices("sidebar")
     _sv = int(st.session_state.get("kb_upload_v_sidebar", 0))
     up = st.file_uploader(
-        "Upload",
+        "Upload (max 50MB per file)",
         type=["pdf", "md", "markdown", "html", "htm"],
         accept_multiple_files=True,
         key=f"sidebar_kb_upload_{_sv}",
         label_visibility="collapsed",
+        help="PDF, Markdown, or HTML — up to 50MB per file.",
     )
     can_index = bool(up) and bool(sid)
     if st.button("Index", use_container_width=True, disabled=not can_index):
@@ -1104,6 +1123,12 @@ def sidebar_settings() -> None:
             key="api_base",
             placeholder=DEFAULT_API,
             help="Include scheme and host (no trailing slash). Health check runs after you edit.",
+        )
+        st.text_input(
+            "API key (optional)",
+            key="api_key",
+            type="password",
+            help="When the API has API_AUTH_ENABLED=true, paste your X-API-Key here.",
         )
         st.caption("After editing User ID or API URL, the page reruns; start **+ New chat** for that user.")
 
@@ -1159,6 +1184,8 @@ def main() -> None:
         st.session_state.kb_upload_v_chat = 0
     if "kb_upload_v_sidebar" not in st.session_state:
         st.session_state.kb_upload_v_sidebar = 0
+    if "api_key" not in st.session_state:
+        st.session_state.api_key = ""
     if "_prev_sidebar_user_id" not in st.session_state:
         st.session_state._prev_sidebar_user_id = (
             st.session_state.get("user_id") or ""

@@ -163,3 +163,9 @@ class DocumentUploadResponse(BaseModel):
     filename: str
     num_chunks: int
     status: str
+
+
+class ApiKeyCreatedResponse(BaseModel):
+    user_id: str
+    api_key: str
+    message: str = "Store this key securely; it will not be shown again."

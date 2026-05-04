@@ -93,7 +93,9 @@ def context_validation_node(state: CogniFlowState) -> dict[str, Any]:
         use_ctx = bool(out.use_context)
         reason = (out.reason or "").strip() or ("validated" if use_ctx else "model_rejected_context")
     except Exception as exc:
-        logger.warning("context_validation structured output failed: %s", exc)
+        logger.warning(
+            "context_validation structured output failed: %s", exc, exc_info=True
+        )
         use_ctx = False
         reason = "llm_validation_failed_prefer_knowledge_fallback"
 
