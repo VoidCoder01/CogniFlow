@@ -15,18 +15,18 @@ An intelligent conversational RAG (Retrieval-Augmented Generation) system that m
 └────────────────────────┬────────────────────────────────┘
                          │ HTTP
 ┌────────────────────────▼────────────────────────────────┐
-│                   FastAPI Backend                        │
-│          /chat   /sessions   /documents/upload           │
+│                   FastAPI Backend                       │
+│          /chat   /sessions   /documents/upload          │
 └────────────────────────┬────────────────────────────────┘
                          │
 ┌────────────────────────▼────────────────────────────────┐
-│              LangGraph Orchestrator                      │
+│              LangGraph Orchestrator                     │
 │    ┌──────────────────────────────────────────────┐     │
-│    │  Query Understanding → Query Rewriting        │     │
-│    │         ↓                    ↓                │     │
-│    │  Retrieval Router → Context Synthesis          │     │
-│    │         ↓                    ↓                │     │
-│    │  Conv. Summarizer → Memory Manager            │     │
+│    │  Query Understanding → Query Rewriting       │     │
+│    │         ↓                    ↓               │     │
+│    │  Retrieval Router → Context Synthesis        │     │
+│    │         ↓                    ↓               │     │
+│    │  Conv. Summarizer → Memory Manager           │     │
 │    └──────────────────────────────────────────────┘     │
 └──────┬──────────────────────────────────┬───────────────┘
        │                                  │
@@ -165,13 +165,22 @@ Messages up to **`STREAMLIT_SHORT_MESSAGE_SYNC_CHARS`** characters (default **12
 
 ```bash
 cp .env.example .env
-# Edit .env
+# Edit .env — at minimum set GOOGLE_API_KEY (or your LLM provider keys). For browser UIs, set ALLOWED_ORIGINS if you changed frontend URLs.
 
-docker-compose up --build
+# Compose V2 (recommended; ships with Docker Desktop / recent Docker Engine):
+docker compose up --build
+
+# Foreground with logs (default). For background:
+# docker compose up --build -d
+
+# Older installs with the standalone compose binary:
+# docker-compose up --build
 ```
 
-- API: http://localhost:8000/docs
-- UI: http://localhost:8501
+- API: http://localhost:8000/docs  
+- UI: http://localhost:8501  
+
+Services: **api** (FastAPI), **streamlit** (UI), **chroma** (vector DB). Data persists in the `cogniflow_data` volume.
 
 ## API Documentation
 
