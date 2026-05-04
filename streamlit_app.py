@@ -11,15 +11,16 @@ import time
 import uuid
 from typing import Any
 
+import httpx
 import requests
 import streamlit as st
 
 DEFAULT_API = os.environ.get("API_BASE_URL", "http://127.0.0.1:8000").rstrip("/")
 # Pause between each chunk in st.write_stream (higher = slower typing effect).
-_UI_STREAM_DELAY_SEC = float(os.environ.get("STREAMLIT_STREAM_DELAY_SEC", "0.05"))
-# Short prompts use POST /chat (one JSON body) instead of SSE token streaming + typing delays.
+_UI_STREAM_DELAY_SEC = float(os.environ.get("STREAMLIT_STREAM_DELAY_SEC", "0.02"))
+# Default 0 = always use SSE /chat/stream (production). Set >0 to use sync POST /chat for short prompts only.
 _SHORT_CHAT_SYNC_MAX_CHARS = int(
-    os.environ.get("STREAMLIT_SHORT_MESSAGE_SYNC_CHARS", "120")
+    os.environ.get("STREAMLIT_SHORT_MESSAGE_SYNC_CHARS", "0")
 )
 
 # Single brand teal for Streamlit UI (no multi-shade accent ramp).
@@ -469,94 +470,106 @@ def run_sync_chat(sid: str, uid: str, prompt: str) -> bool:
 
 def run_streaming_chat(sid: str, uid: str, prompt: str) -> bool:
     """
-    POST /chat/stream (SSE). Used when the prompt is longer than
-    ``STREAMLIT_SHORT_MESSAGE_SYNC_CHARS`` (see ``run_sync_chat`` for short prompts).
+    POST /chat/stream (SSE). Uses **httpx** streaming (better line framing than ``requests`` for SSE).
 
-    Streamlit only redraws progressively for ``st.write_stream``, not for repeated
-    ``empty().markdown`` in a loop—so we use a spinner while the graph runs and a generator
-    that yields ``token`` chunks (or falls back to chunking the final reply).
+    Server may send ``:`` comment lines and ``phase`` events before ``token``; only ``token`` /
+    ``done`` / ``error`` affect the visible stream.
     """
     url = f"{api_base()}/api/v1/chat/stream"
     t0 = time.perf_counter()
     stream_state: dict[str, Any] = {"done": None, "error": None, "n_tokens": 0}
+    headers = {
+        **_api_headers(),
+        "Accept": "text/event-stream",
+        "Cache-Control": "no-cache",
+    }
 
     try:
-        with requests.post(
-            url,
-            json={"session_id": sid, "user_id": uid, "message": prompt},
-            stream=True,
-            timeout=600,
-            headers=_api_headers(),
-        ) as resp:
-            if resp.status_code == 404:
-                st.error("Session not found. Start a new chat from the sidebar.")
-                return False
-            if resp.status_code != 200:
-                st.error(f"Chat failed ({resp.status_code}): {resp.text}")
-                return False
-
-            def sse_answer_chunks():
-                for raw_line in resp.iter_lines(decode_unicode=True):
-                    if not raw_line:
-                        continue
-                    line = raw_line.strip()
-                    if not line.startswith("data:"):
-                        continue
-                    pl = line[5:].strip()
-                    if not pl:
-                        continue
+        with httpx.Client(timeout=httpx.Timeout(600.0)) as client:
+            with client.stream(
+                "POST",
+                url,
+                json={"session_id": sid, "user_id": uid, "message": prompt},
+                headers=headers,
+            ) as resp:
+                if resp.status_code == 404:
+                    st.error("Session not found. Start a new chat from the sidebar.")
+                    return False
+                if resp.status_code != 200:
+                    err_txt = ""
                     try:
-                        evt_obj = json.loads(pl)
-                    except json.JSONDecodeError:
-                        continue
+                        err_txt = (resp.read() or b"").decode(
+                            resp.encoding or "utf-8", errors="replace"
+                        )[:2000]
+                    except Exception:
+                        err_txt = resp.reason_phrase or ""
+                    st.error(f"Chat failed ({resp.status_code}): {err_txt}")
+                    return False
 
-                    ev = evt_obj.get("event")
-                    if ev == "error":
-                        stream_state["error"] = str(
-                            evt_obj.get("detail", "Stream error")
-                        )
-                        return
-                    if ev == "token":
-                        piece = evt_obj.get("data")
-                        if piece is None:
+                def sse_answer_chunks():
+                    for line in resp.iter_lines():
+                        if not line:
                             continue
-                        if not isinstance(piece, str):
-                            piece = str(piece)
-                        stream_state["n_tokens"] = (
-                            int(stream_state.get("n_tokens", 0)) + 1
-                        )
-                        yield piece
-                        time.sleep(_UI_STREAM_DELAY_SEC)
-                    elif ev == "done":
-                        data = evt_obj.get("data")
-                        d = data if isinstance(data, dict) else None
-                        if d and int(stream_state.get("n_tokens", 0)) == 0:
-                            ans = (d.get("response") or "").strip()
-                            if ans:
-                                yield from _stream_text_chunks(ans)
-                        stream_state["done"] = d
-                        return
-                    # ev == "update": LangGraph progress — spinner covers this phase
+                        ls = line.strip()
+                        if not ls.startswith("data:"):
+                            continue
+                        pl = ls[5:].strip()
+                        if not pl:
+                            continue
+                        try:
+                            evt_obj = json.loads(pl)
+                        except json.JSONDecodeError:
+                            continue
 
-            with st.spinner("Running agents & generating your answer…"):
-                st.write_stream(sse_answer_chunks())
+                        ev = evt_obj.get("event")
+                        if ev == "error":
+                            stream_state["error"] = str(
+                                evt_obj.get("detail", "Stream error")
+                            )
+                            return
+                        if ev == "phase":
+                            continue
+                        if ev == "token":
+                            piece = evt_obj.get("data")
+                            if piece is None:
+                                continue
+                            if not isinstance(piece, str):
+                                piece = str(piece)
+                            stream_state["n_tokens"] = (
+                                int(stream_state.get("n_tokens", 0)) + 1
+                            )
+                            yield piece
+                            if _UI_STREAM_DELAY_SEC > 0:
+                                time.sleep(_UI_STREAM_DELAY_SEC)
+                        elif ev == "done":
+                            data = evt_obj.get("data")
+                            d = data if isinstance(data, dict) else None
+                            if d and int(stream_state.get("n_tokens", 0)) == 0:
+                                ans = (d.get("response") or "").strip()
+                                if ans:
+                                    yield from _stream_text_chunks(ans)
+                            stream_state["done"] = d
+                            return
 
-            if stream_state.get("error"):
-                st.error(stream_state["error"])
-                return False
+                with st.spinner("Running agents & generating your answer…"):
+                    st.write_stream(sse_answer_chunks())
 
-            done_payload = stream_state.get("done")
-            if not isinstance(done_payload, dict):
-                st.error("No response from server (stream ended early).")
-                return False
+                if stream_state.get("error"):
+                    st.error(stream_state["error"])
+                    return False
 
-            answer = (done_payload.get("response") or "").strip()
-            if not answer and int(stream_state.get("n_tokens", 0)) == 0:
-                st.markdown("_No response text returned._")
+                done_payload = stream_state.get("done")
+                if not isinstance(done_payload, dict):
+                    st.error("No response from server (stream ended early).")
+                    return False
 
-            _finalize_assistant_turn_from_api(done_payload, client_t0=t0)
-            return True
-    except requests.RequestException as e:
+                answer = (done_payload.get("response") or "").strip()
+                if not answer and int(stream_state.get("n_tokens", 0)) == 0:
+                    st.markdown("_No response text returned._")
+
+                _finalize_assistant_turn_from_api(done_payload, client_t0=t0)
+                return True
+    except (httpx.RequestError, httpx.HTTPStatusError) as e:
         st.error(f"**Cannot reach the API.** Is it running?\n\n`{e}`")
         return False
 

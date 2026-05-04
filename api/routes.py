@@ -333,6 +333,8 @@ def chat_stream(
         history, summary_from_db = _load_history_window(store, body.session_id)
         ctx_fp = response_cache_context_fp(summary_from_db, history)
         try:
+            # Immediate SSE comment so proxies/clients see a byte on the wire (avoids "nothing until LLM" confusion).
+            yield b": stream-open\n\n"
             if settings.chat_exact_message_cache_enabled:
                 cached = get_cached(
                     body.session_id, body.user_id, msg, context_fp=ctx_fp
@@ -395,7 +397,13 @@ def chat_stream(
                 cross_session_context=cross_ctx,
             )
             graph_state = orchestrator.prepare_graph_payload(agent)
+            yield (
+                f"data: {json.dumps({'event': 'phase', 'data': {'step': 'routing'}}, ensure_ascii=False)}\n\n"
+            ).encode()
             orchestrator.run_until_before_synthesis(graph_state)
+            yield (
+                f"data: {json.dumps({'event': 'phase', 'data': {'step': 'llm'}}, ensure_ascii=False)}\n\n"
+            ).encode()
             n_tokens_streamed = 0
             for evt in orchestrator.iter_streaming_synthesis(graph_state):
                 et = evt.get("type")
@@ -518,9 +526,11 @@ def chat_stream(
             yield f"data: {err}\n\n".encode()
 
     hdrs = {
-        "Cache-Control": "no-cache",
+        "Cache-Control": "no-cache, no-transform",
         "Connection": "keep-alive",
         "X-Accel-Buffering": "no",
+        # Hint caches/CDNs not to treat this as a cacheable document (some strip SSE without this).
+        "Surrogate-Control": "no-store",
     }
     if rid0 := getattr(request.state, "request_id", None):
         hdrs["X-Request-ID"] = rid0

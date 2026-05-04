@@ -266,3 +266,13 @@ def test_synthesis_prompts_helper():
     assert refuse is None
 
 
+def test_stream_chunk_text_block_content():
+    """Gemini-style stream chunks use content blocks; ``.text`` / normalizer must yield real text."""
+    from langchain_core.messages.ai import AIMessageChunk
+
+    from agents.context_synthesis import _stream_chunk_text
+
+    assert _stream_chunk_text(AIMessageChunk(content=[{"type": "text", "text": "hello"}])) == "hello"
+    assert _stream_chunk_text(AIMessageChunk(content="x")) == "x"
+
+

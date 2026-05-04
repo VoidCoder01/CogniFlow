@@ -159,7 +159,21 @@ uvicorn main:app --host 0.0.0.0 --port 8000 --reload
 streamlit run streamlit_app.py
 ```
 
-Messages up to **`STREAMLIT_SHORT_MESSAGE_SYNC_CHARS`** characters (default **120**) call **`POST /api/v1/chat`** instead of **`/chat/stream`**, so short prompts skip SSE and per-token typing delays. Set **`STREAMLIT_SHORT_MESSAGE_SYNC_CHARS=0`** to always use streaming, or raise the limit to use **`/chat`** for longer prompts.
+By default **`STREAMLIT_SHORT_MESSAGE_SYNC_CHARS=0`**: the UI always uses **`POST /api/v1/chat/stream`** (SSE + `httpx` streaming) for token-by-token display. Set it to a positive number (e.g. **120**) if you want short prompts to use sync **`POST /api/v1/chat`** instead (slightly less overhead, no live tokens).
+
+**Reverse proxies (production):** for `/api/v1/chat/stream`, disable buffering and allow long reads, e.g. Nginx:
+
+```nginx
+location /api/v1/chat/stream {
+    proxy_pass http://127.0.0.1:8000;
+    proxy_http_version 1.1;
+    proxy_set_header Connection "";
+    proxy_buffering off;
+    proxy_cache off;
+    proxy_read_timeout 3600s;
+    chunked_transfer_encoding on;
+}
+```
 
 ### Docker (alternative)
 

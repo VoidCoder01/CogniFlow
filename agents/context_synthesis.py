@@ -213,6 +213,27 @@ def context_synthesis_node(state: CogniFlowState) -> dict[str, Any]:
     }
 
 
+def _stream_chunk_text(chunk: object) -> str:
+    """Normalize a LangChain stream chunk to plain text (Gemini/OpenAI use block-shaped ``content`` lists)."""
+    piece = getattr(chunk, "text", None)
+    if isinstance(piece, str) and piece:
+        return piece
+    raw = getattr(chunk, "content", None)
+    if isinstance(raw, str) and raw:
+        return raw
+    if isinstance(raw, list):
+        parts: list[str] = []
+        for part in raw:
+            if isinstance(part, str):
+                parts.append(part)
+            elif isinstance(part, dict):
+                t = part.get("text")
+                if isinstance(t, str):
+                    parts.append(t)
+        return "".join(parts)
+    return ""
+
+
 def iter_context_synthesis_events(state: CogniFlowState) -> Iterator[dict[str, Any]]:
     """Stream LLM tokens for synthesis, then emit a final ``complete`` event (mirrors ``context_synthesis_node``)."""
     t0 = time.perf_counter()
@@ -225,9 +246,7 @@ def iter_context_synthesis_events(state: CogniFlowState) -> Iterator[dict[str, A
     ]
     full_response: list[str] = []
     for chunk in model.stream(messages):
-        token = getattr(chunk, "content", "") or ""
-        if isinstance(token, list):
-            token = "".join(str(part) for part in token)
+        token = _stream_chunk_text(chunk)
         if token:
             full_response.append(token)
             yield {"type": "token", "data": token}
