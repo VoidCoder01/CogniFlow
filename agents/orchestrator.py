@@ -119,7 +119,7 @@ def build_graph(
     g = StateGraph(CogniFlowState)
     g.add_node("query_understanding", query_understanding_node)
     g.add_node("query_rewriting", query_rewriting_node)
-    g.add_node("query_decomposer", query_decomposer_node)
+    g.add_node("query_decomposemr", query_decomposer_node)
     g.add_node("retrieval_router", retrieval_router_node)
     g.add_node("context_validation", context_validation_node)
     g.add_node("context_synthesis", context_synthesis_node)
